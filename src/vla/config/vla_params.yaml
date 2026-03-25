@@ -1,0 +1,23 @@
+openvla_client:
+  ros__parameters:
+    camera_topic: /camera/image_raw
+    action_topic: /openvla/action
+    instruction: "grab the red ball"
+    server_url: "http://127.0.0.1:8000/act"
+    unnorm_key: "bridge_orig"
+    timeout_sec: 120.0
+
+action_bridge:
+  ros__parameters:
+    input_topic: /openvla/action
+    trajectory_topic: /joint_trajectory_controller/joint_trajectory
+    joint_names:
+      - joint1
+      - joint2
+      - joint3
+      - joint4
+      - joint5
+      - joint6
+    use_deltas: false
+    default_move_time: 2.0
+    current_positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
