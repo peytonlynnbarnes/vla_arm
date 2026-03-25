@@ -25,9 +25,11 @@ def generate_launch_description():
     x = LaunchConfiguration('x')
     y = LaunchConfiguration('y')
     z = LaunchConfiguration('z')
+    controllers_file = LaunchConfiguration('controllers_file')
 
     xacro_file = os.path.join(pkg_share, 'description', 'so101.urdf.xacro')
     urdf_file = '/tmp/so101.urdf'
+    default_controllers_file = os.path.join(pkg_share, 'config', 'controllers.yaml')
 
     declare_use_sim_time = DeclareLaunchArgument(
         'use_sim_time',
@@ -37,7 +39,7 @@ def generate_launch_description():
 
     declare_world = DeclareLaunchArgument(
         'world',
-        default_value='empty.sdf',
+        default_value=os.path.join(pkg_share, 'worlds', 'ball_world.sdf'),
         description='Gazebo world file to load'
     )
 
@@ -71,12 +73,18 @@ def generate_launch_description():
         description='Spawn Z position'
     )
 
+    declare_controllers_file = DeclareLaunchArgument(
+        'controllers_file',
+        default_value=default_controllers_file,
+        description='Path to ros2_control controllers YAML file'
+    )
+
     gz_resource_path = SetEnvironmentVariable(
         name='GZ_SIM_RESOURCE_PATH',
         value=[
             EnvironmentVariable('GZ_SIM_RESOURCE_PATH', default_value=''),
             ':',
-            os.path.dirname(pkg_share)  # <-- THIS is the fix
+            os.path.dirname(pkg_share)
         ]
     )
 
@@ -91,6 +99,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             'use_sim_time': use_sim_time,
+            'xacro_file': xacro_file,
         }.items()
     )
 
@@ -125,9 +134,55 @@ def generate_launch_description():
         output='screen'
     )
 
+    joint_state_broadcaster_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=[
+            'joint_state_broadcaster',
+            '--controller-manager', '/controller_manager',
+            '--ros-args',
+            '-p', 'use_sim_time:=true'
+        ],
+        output='screen'
+    )
+
+    arm_controller_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=[
+            'arm_controller',
+            '--controller-manager', '/controller_manager',
+            '--ros-args',
+            '-p', 'use_sim_time:=true'
+        ],
+        output='screen'
+    )
+
+    clock_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
+        output='screen'
+    )
+
+    camera_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=['/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image'],
+        output='screen'
+    )
+
     delayed_spawn = TimerAction(
         period=3.0,
         actions=[spawn_robot]
+    )
+
+    delayed_controllers = TimerAction(
+        period=6.0,
+        actions=[
+            joint_state_broadcaster_spawner,
+            arm_controller_spawner
+        ]
     )
 
     return LaunchDescription([
@@ -138,9 +193,13 @@ def generate_launch_description():
         declare_x,
         declare_y,
         declare_z,
+        declare_controllers_file,
         gz_resource_path,
         generate_urdf,
         rsp,
         gazebo,
+        clock_bridge,
+        camera_bridge,
         delayed_spawn,
+        delayed_controllers,
     ])

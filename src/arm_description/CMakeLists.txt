@@ -13,6 +13,7 @@ install(
     launch
     worlds
     assets
+    config
   DESTINATION share/${PROJECT_NAME}
 )
 
