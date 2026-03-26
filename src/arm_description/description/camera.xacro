@@ -6,11 +6,11 @@
       prefix:=camera
       xyz:='0 0 0'
       rpy:='0 0 0'
-      width:=640
-      height:=480
-      hfov:=1.047
+      width:=1280
+      height:=720
+      hfov:=1.547
       update_rate:=30
-      near_clip:=0.02
+      near_clip:=0.01
       far_clip:=10.0">
 
     <link name="${prefix}_link">
@@ -19,12 +19,19 @@
         <mass value="0.02"/>
         <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
       </inertial>
+
       <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
           <box size="0.03 0.03 0.02"/>
         </geometry>
+        <material name="Blue">
+          <color rgba="0 0 1 1"/>
+        </material>
       </visual>
+
       <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
         <geometry>
           <box size="0.03 0.03 0.02"/>
         </geometry>
