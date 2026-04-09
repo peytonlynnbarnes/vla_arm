@@ -1,0 +1,7 @@
+ssh -L 8000:localhost:8000 pe606840@nobel.ece.ucf.edu 
+python vla-scripts/deploy.py \
+  --openvla_path openvla/openvla-7b \
+  --host 0.0.0.0 \
+  --port 8000
+
+  
