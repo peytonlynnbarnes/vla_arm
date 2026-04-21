@@ -13,8 +13,8 @@ ament_python_install_package(${PROJECT_NAME})
 
 # Install executable Python node scripts
 install(PROGRAMS
-  vla/test_client.py 
-  vla/openvla_client.py 
+  vla/vla_action_client.py 
+  vla/action_to_ee.py
   vla/vla_ik.py
   DESTINATION lib/${PROJECT_NAME}
 )
