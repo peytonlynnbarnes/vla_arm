@@ -2,6 +2,23 @@
 
 Human-readable log of changes Claude has applied. Newest entries at the top.
 
+## 2026-04-23 — devcontainer for running Claude Code in bypass mode
+
+Motivation: the user wants to run Claude Code with `--permission-mode bypassPermissions` without giving it the whole user account. A git worktree isolates branches but not the filesystem/credentials, so the bypass-mode warning still applies on bare metal. Containerising solves that.
+
+New directory `.devcontainer/`:
+
+- **`Dockerfile`** — `ros:jazzy-ros-base` + `ros-jazzy-{joint-trajectory-controller,ros-gz,gz-ros2-control,rviz2,xacro}` + `python3-{opencv,requests}` + `json-numpy` (pip, `--break-system-packages` because no apt package exists) + Node 20 + `@anthropic-ai/claude-code`. Creates a `dev` user with `USER_UID`/`USER_GID` build args so bind-mounted files keep host ownership. The `ros:jazzy-ros-base` image ships with an `ubuntu` user at UID/GID 1000 from the Ubuntu 24.04 base, so the user-creation step first `userdel -r`/`groupdel`s whatever currently holds the target UID/GID before creating `dev` — otherwise `groupadd --gid 1000` exits 4. Sources `/opt/ros/jazzy/setup.bash` and `/workspace/install/setup.bash` via `BASH_ENV=/etc/profile.d/ros.sh` so every `bash -c` Claude runs has ROS available, not just interactive shells.
+- **`entrypoint.sh`** — sources ROS + workspace overlay, then `exec "$@"`. Belt-and-braces alongside `BASH_ENV` for the top-level `claude` process's env.
+- **`run.sh`** — builds the image with the host's UID/GID, then `docker run --rm -it --network=host -v $REPO:/workspace -v ~/.claude-vla-arm:/home/dev/.claude … claude --permission-mode bypassPermissions`. Deliberately **does not** mount `$HOME`, `~/.ssh`, `~/.aws`, or `~/.config/gh`. Uses `~/.claude-vla-arm` (not `~/.claude`) so the container's Claude auth is separate from the host user's — first run will prompt to log in. `--network=host` is required for the OpenVLA SSH tunnel at `localhost:8000`; on Linux this is fine, though it does give the container access to the rest of the host loopback.
+- Two invocation modes: `./run.sh` launches Claude in bypass mode; `./run.sh shell` drops into bash for poking around inside the container.
+
+Not done (callable follow-ups if needed):
+
+- **No GPU/X11 wiring.** Gazebo/RViz rendering inside the container would need `--gpus all` + `nvidia-container-toolkit` on the host and `-e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix` + `xhost +local:` — skipped since the expected bypass-mode workload is code edits + `colcon build`, and Gazebo can still run on the host. Easy to add to `run.sh` later.
+- **No `devcontainer.json`.** VS Code devcontainer users can add one; the shell script is the primary interface.
+- **Image not built.** Builds on first `./run.sh` run (~5 min, pulls `ros:jazzy-ros-base` ~1 GB + apt/npm).
+
 ## 2026-04-23 — third-person camera reframing + place-target marker for pick-and-place
 
 Goal: ready the scene for a fine-tuning dataset where the task is "pick the {red,blue} ball and place it on the green marker." Camera previously framed the arm base dead-centre (optical axis hit world `(0.141, 0, 0)`), so the balls were ~10° off-centre and the arm filled the top half of the frame. Also, no place-target existed in the world — the earlier cup/pot/sponge layout had been reverted to bare balls.
