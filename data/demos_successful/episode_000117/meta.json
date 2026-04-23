@@ -1,0 +1,20 @@
+{
+  "episode_index": 16,
+  "target": "red_ball",
+  "n_frames": 199,
+  "success": null,
+  "duration_sec": 19.800244331359863,
+  "image_shape": [
+    224,
+    224,
+    3
+  ],
+  "joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper"
+  ]
+}

@@ -103,6 +103,14 @@ def generate_launch_description():
         }.items()
     )
 
+    headless = LaunchConfiguration('headless')
+
+    declare_headless = DeclareLaunchArgument(
+        'headless',
+        default_value='true',
+        description='Run Gazebo server-only (no GUI). Required in the devcontainer.'
+    )
+
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -112,11 +120,12 @@ def generate_launch_description():
             ])
         ),
         launch_arguments={
+            # -s: server only (no GUI); -r: run immediately; --headless-rendering forces offscreen.
             'gz_args': [
-                '-r ',
-                '--render-engine ', render_engine,
+                '-r -s --headless-rendering --render-engine ',
+                render_engine,
                 ' ',
-                world
+                world,
             ]
         }.items()
     )
@@ -158,6 +167,18 @@ def generate_launch_description():
         output='screen'
     )
 
+    gripper_controller_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=[
+            'gripper_controller',
+            '--controller-manager', '/controller_manager',
+            '--ros-args',
+            '-p', 'use_sim_time:=true'
+        ],
+        output='screen'
+    )
+
     clock_bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
@@ -172,6 +193,20 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Bridge ROS 2 std_msgs/Empty -> gz.msgs.Empty so DetachableJoint can be triggered
+    # from ROS-side tools (the expert policy, the demo orchestrator).
+    detach_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '/attach_blue@std_msgs/msg/Empty]gz.msgs.Empty',
+            '/detach_blue@std_msgs/msg/Empty]gz.msgs.Empty',
+            '/attach_red@std_msgs/msg/Empty]gz.msgs.Empty',
+            '/detach_red@std_msgs/msg/Empty]gz.msgs.Empty',
+        ],
+        output='screen'
+    )
+
     delayed_spawn = TimerAction(
         period=3.0,
         actions=[spawn_robot]
@@ -181,7 +216,8 @@ def generate_launch_description():
         period=6.0,
         actions=[
             joint_state_broadcaster_spawner,
-            arm_controller_spawner
+            arm_controller_spawner,
+            gripper_controller_spawner,
         ]
     )
 
@@ -194,12 +230,14 @@ def generate_launch_description():
         declare_y,
         declare_z,
         declare_controllers_file,
+        declare_headless,
         gz_resource_path,
         generate_urdf,
         rsp,
         gazebo,
         clock_bridge,
         third_person_bridge,
+        detach_bridge,
         delayed_spawn,
         delayed_controllers,
     ])

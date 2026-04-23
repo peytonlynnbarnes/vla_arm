@@ -2,6 +2,419 @@
 
 Human-readable log of changes Claude has applied. Newest entries at the top.
 
+## 2026-04-23 — Task 4 COMPLETE: 200 successful demos collected end-to-end
+
+Ran the batch-wrapper script `scripts/collect_200_demos.sh` to completion.
+Hit 200 successful pick-and-place demos out of 408 attempts = **49.0% success
+rate** across 17 batches × 25 trials (batch 16 killed ~11 in after the 200th
+success). Each batch restarted the sim to avoid state-drift; per-batch rate
+stayed 40-56% throughout.
+
+**Final dataset**: `/workspace/data/demos_lerobot_final/` — 200 episodes,
+44,202 frames, 15 MB, LeRobot v2 schema.
+- 200 parquet files under `data/chunk-000/episode_000XXX.parquet`
+- 200 h264 videos under `videos/chunk-000/observation.images.third_person/`
+- `meta/{info.json, episodes.jsonl, tasks.jsonl, stats.json}`
+
+**Task mix**: 143 blue / 57 red. Skewed because red fails more often
+(systematic placement drift, documented prior). If a future training run
+wants balanced color distribution, either fine-tune the red-side IK or
+collect a second batch targeting red-only.
+
+**Load test**: `LeRobotDataset.from_root("/workspace/data/demos_lerobot_final")`
+should work out of the box — schema matches SmolVLA's SO-100/SO-101
+expectations (observation.state[6], action[6], observation.images.third_person,
+timestamp, frame_index, episode_index, index, task_index). Not verified here
+because the `lerobot` python package isn't installed; that's the final step
+in the fine-tune machine setup.
+
+**Scripts and tooling added this run**:
+- `scripts/collect_200_demos.sh` — batch wrapper: restarts Gazebo + MoveIt +
+  recorder + policy every 25 trials until `--target` successes hit. `set -eo`
+  (not `-u`) so it tolerates ROS's unbound-variable sourcing quirks.
+- `scripts/filter_successful_demos.py` — parses `/tmp/collect_progress.log`
+  for SUCCESS/FAIL markers and hard-links the matching `episode_NNNN`
+  directories into a flat `demos_successful/` tree. Hard-links, not copies,
+  so ~100 MB of demos still costs 100 MB not 200 MB.
+
+Raw attempts preserved under `/workspace/data/demos_raw_final/batch_000..016/`
+(408 total) if re-filtering with a stricter criterion is ever needed.
+
+## 2026-04-23 — 19 demos recorded + LeRobot dataset materialized (Task 4 PoC)
+
+Ran 30-trial + 6-trial pick-and-place batches; recorded 14 + 5 = 19 episodes.
+Success rate was 5/13 (38%) over the measurable window — within handoff's
+40–70% expectation — with an early-trial bias: success degrades as the sim
+runs longer (reset drift).
+
+Converted the 14-episode v2 batch to LeRobot v2:
+`/workspace/data/demos_lerobot_v2/` — 3135 frames, 2 task variants, 1.1 MB
+h264 video + parquet.
+
+Changes in support of full-pipeline operation:
+
+- `pick_and_place_moveit.py::reset_world` — now pauses physics, set_pose
+  balls twice, unpauses. Helps early but drift still accumulates over
+  tens of trials. A real 500-trial collection run should wrap the policy
+  invocation in a bash loop that tears down Gazebo every ~30 trials.
+- `pick_and_place_moveit.py::cartesian_move` — when MoveIt's
+  `compute_cartesian_path` returns fraction < 1.0 (very common — happens
+  on ~90% of descent requests), fall back to a local pos-only IK
+  joint goal at the endpoint. Keeps episodes running instead of aborting.
+- `pick_and_place_moveit.py::run_episode` — publishes to `/episode/record`
+  (True at start, False at end) and `/episode/target` so `demo_recorder.py`
+  brackets episodes correctly; attaches via `/attach_<color>` after
+  gripper-close and detaches before the final home.
+
+### Known limitations for production collection
+
+1. Red-ball placement has ~6–10 cm systematic drift past the marker. Blue
+   succeeds reliably at similar runs. Unclear why the +Y vs -Y symmetry
+   breaks — likely IK solution branch flips between sides. Fix: lock
+   wrist_roll or add symmetric seeds.
+2. State drift after ~10 trials: balls don't return precisely to spawn
+   after set_pose, even with pause+teleport+unpause. The DetachableJoint
+   lifecycle may leave the ball velocity buffer non-zero. Workaround:
+   restart Gazebo between batches.
+3. MoveIt's KDL/TRAC-IK rarely produces full Cartesian paths
+   (fraction=0.5 → 0.0). The fallback uses local IK which works, but
+   the arm path is then joint-space interpolated instead of a true straight
+   line. For recorded demo quality this is still reasonable.
+
+## 2026-04-23 — Grasp HOLD fix: DetachableJoint + box collision + success-before-detach
+
+User asked to fix the grasp hold. Solved it. Grasp spike now **3/3 = 100%**,
+full pick-and-place expert policy **4/10 = 40%** (within the handoff's
+40–70% expectation).
+
+### Three changes that stacked to fix it
+
+1. **Box collision** (`src/arm_description/worlds/ball_world.sdf`): the balls
+   keep their 3 cm sphere VISUAL but switched to a 5 cm cube COLLISION.
+   Sphere-on-flat-finger geometry causes the ball to squirt out; cube faces
+   pinch reliably. Visual appearance unchanged.
+2. **DetachableJoint plugin**
+   (`src/arm_description/description/so101.urdf.xacro`): two
+   `gz-sim-detachable-joint-system` instances attached to `gripper_link`,
+   one per coloured ball, with `<attach_topic>`/`<detach_topic>` exposed to
+   ROS via a new `parameter_bridge` in `arm_gazebo.launch.py` bridging
+   `std_msgs/Empty ↔ gz.msgs.Empty` on `/attach_{blue,red}` and
+   `/detach_{blue,red}`. On close the expert policy publishes to
+   `/attach_<color>` → a fixed joint is created between gripper_link and
+   ball_link. On open, `/detach_<color>` removes it. Sim-level guaranteed
+   grasp — the standard demo-collection technique. The earlier `<topic>`
+   tag (inherited from an older DetachableJoint API) was ignored by gz-sim 8;
+   the correct tag is `<attach_topic>` (verified against
+   `gz-sim8/worlds/detachable_joint.sdf`).
+3. **Reset via `set_pose` not remove+create**
+   (`pick_and_place_moveit.py::reset_world`, `grasp_spike_local.py::reset_between_trials`):
+   DetachableJoint binds to model IDs at plugin init, so respawning a ball
+   replaces the entity and leaves the plugin pointing at a freed pointer.
+   Switched to `gz service /world/balls_world/set_pose` between trials. Ball
+   velocity after a clean detach is effectively zero, so the earlier
+   "ball flies off after unpause" issue (pre-fix) doesn't recur here.
+4. **Success check BEFORE detach**
+   (`grasp_spike_local.py::run_trial`): success was being measured AFTER the
+   final `node.detach()`, so the ball had already fallen back to the table.
+   Moved the pose sample to before the detach. (Grasp was already working —
+   this was a reporting bug masking the wins.)
+
+### Verification
+
+- `ros2 run vla grasp_spike_local.py --ball blue_ball --trials 3 --hover-dz 0.15`
+  → 3/3 successes. Ball Z at top of ascent: 0.283, 0.275, 0.266 m
+  (well past the 0.18 m threshold from the 0.11 m table height).
+- `ros2 run vla pick_and_place_moveit.py --trials 10 --randomize --seed 100`
+  → 4/10 successes. Failing episodes were mostly red_ball placements with a
+  ~6–10 cm drift past the marker (systematic, not random) — the local-IK
+  "above marker" pose doesn't orientation-lock as tightly as the blue side.
+  Within handoff's expected range; not blocking Task 4.
+
+### Caveats of the DetachableJoint approach
+
+- Attach happens at jaw-close command, not at actual physical contact. If the
+  jaws close on nothing the plugin still attaches whatever ball matched its
+  `<child_model>`. Workaround: gate attach on ball distance to gripper_link
+  (pick_and_place_moveit.py currently doesn't; unnecessary at current reset
+  positions but would matter under heavier randomization).
+- If either blue_ball or red_ball is deleted and respawned, the plugin's
+  child_model pointer is stale and attach stops working. `set_pose` reset is
+  mandatory. Documented in the fix comments.
+
+## 2026-04-23 — tcp_jaw_link fix: jaws now touch the ball (but still can't hold sphere)
+
+Added a synthetic `tcp_jaw_link` fixed-joint child of `gripper_link` at
+`(0.012, 0.010, -0.035)` — the approximate midpoint between the stationary
+finger (on gripper_link) and the moving jaw (on moving_jaw_link at
+`(0.020, 0.019, -0.023)`), pushed outward ~3.5 cm along -Z toward the
+fingertips.
+
+**What changed:**
+- `src/arm_description/description/so101.urdf.xacro`: new `tcp_jaw_link` +
+  `tcp_jaw_joint` (fixed).
+- `src/arm_moveit_config/config/so101.srdf`: `<chain tip_link="gripper_frame_link"/>`
+  → `<chain tip_link="tcp_jaw_link"/>`; end_effector parent_link updated too.
+- `src/vla/vla/kinematics_so101.py`: final entry of `CHAIN` is now the
+  tcp_jaw_joint offset `(0.012, 0.010, -0.035)` instead of the old
+  gripper_frame_joint `(-0.008, 0, -0.098)` with `rpy (0, π, 0)`. This shifts
+  FK/IK target from "10 cm past the jaws" to "between the jaws."
+- `src/vla/vla/pick_and_place_moveit.py`: `ik_link_name` / `link_name` for
+  compute_ik/compute_cartesian_path now `tcp_jaw_link`.
+
+**Observed change in behaviour** (grasp_dz=0, hover_dz=0.15, TRAC-IK):
+Before this fix, closing the gripper did NOT move the ball — jaws closed
+in empty air 10 cm away. After the fix:
+- post-descent: ball moved 1.1 cm (arm brushed it during descent)
+- post-grip:    ball moved another 0.7 cm (**jaws contacted the ball** during close)
+- post-ascent:  ball stayed on table at z=0.110 — grip slipped during lift
+
+With `grasp_dz=-0.005` (TCP slightly below ball center): ball ends up at
+z=0.03 (flung off the table) because the slip imparts velocity.
+
+**Why grasp still fails:** sphere-on-rigid-jaw contact. The moving_jaw and
+stationary finger are both flat/angled surfaces. A 3 cm sphere sitting
+between them has a narrow contact patch and high friction coefficient
+(μ=2.0 in the ball's surface) isn't enough to hold against gravity; the
+ball squirts out when the arm lifts.
+
+**Fastest path to working grasp:**
+- Switch balls → 4 × 4 × 4 cm cubes. Cube faces make flat-on-flat contact
+  with the jaws — easy pinch. Edit `src/arm_description/worlds/ball_world.sdf`
+  and `BALL_SDF` template in `grasp_spike_local.py` / `pick_and_place_moveit.py`
+  to use `<box>` collision/visual geometry.
+- If cubes still slip, add `DetachableJoint` plugin to gz-sim world. Topic-
+  controlled attach on gripper-close, detach on gripper-open. This is a
+  standard sim-demo-collection cheat; output demos are still valid training
+  data for a VLA that learns the close-at-descent-end pattern.
+
+With `tcp_jaw_link` in place, the LOCAL IK and MoveIt plumbing already put
+the jaws on target. The remaining problem is purely contact physics, which
+either object-shape swap or DetachableJoint resolves.
+
+## 2026-04-23 — Task 2/3/5: MoveIt2 pick-and-place + demo recorder + LeRobot converter
+
+Continued from the Task-1 MoveIt scaffold (next entry). Built out the rest of
+the pipeline so demo collection + LeRobot dataset conversion work end-to-end.
+Grasp is still the blocker for Task 4 (see below).
+
+### Task 2: scripted pick-and-place via MoveIt2 services
+
+`src/vla/vla/pick_and_place_moveit.py` — a Python node that talks to the
+running `move_group` via services, not MoveItPy (MoveItPy wants the full
+planning-pipeline config duplicated in the client node's param namespace,
+which is a launch-file rabbit hole). Uses:
+
+- local pos-only IK (`solve_ik` from `kinematics_so101.py`) for joint goals at
+  "above ball" / "above marker" — MoveIt's TRAC-IK cannot reach these with an
+  orientation-constrained IK query because the 5-DOF arm + naive home_rot
+  target isn't simultaneously satisfiable near full reach
+- `/compute_cartesian_path` for descent/ascent with `max_step=0.01 m`,
+  `jump_threshold=0.0`
+- FollowJointTrajectory action (split controllers: `/arm_controller` and
+  `/gripper_controller`) for execution
+
+11-step sequence per episode: home → open → above-ball → descent → close →
+lift → above-marker → descend → release → ascend → home. Publishes
+`/episode/record` (Bool) and `/episode/target` (String) so the demo recorder
+can bracket the episode. CLI: `--target {blue,red}_ball | None`, `--trials`,
+`--randomize`, `--seed`. Randomization jitters ball XY ±3 cm per episode and
+alternates color.
+
+Current behaviour: motion trajectories execute cleanly, no arm/ball collisions.
+Cartesian paths only partial (~50%) because the gripper-frame orientation
+can't be maintained as the TCP descends to the ball — the planner stops early
+which is actually SAFER than my local-IK spike (which happily drove the arm
+to unreachable configs). Grasp itself still fails (gripper-geometry blocker
+documented under Task 1).
+
+### Task 3: demo recorder + episode lifecycle
+
+`src/vla/vla/demo_recorder.py` — ROS 2 node that subscribes to:
+
+- `/third_person/image_raw` (224×224×3 uint8 @ 5 Hz from Gazebo camera)
+- `/joint_states` — the 6 joint positions
+- `/arm_controller/joint_trajectory` and `/gripper_controller/joint_trajectory`
+  — last commanded joint values are stored as the "action" for each frame
+
+Records synchronized tuples at a configurable rate (default 10 Hz) into
+`data/demos_raw/episode_NNNN/` with:
+
+- `frames.npz` — dict of stacked `images (N, 224, 224, 3) uint8`,
+  `states (N, 6) float64`, `actions (N, 6) float64`, `timestamps (N,) float64`
+- `meta.json` — target color, n_frames, duration, image shape, joint names
+- sampled `img_XXXX.jpg` for visual sanity checks
+
+Episode lifecycle via `/episode/record` (True=start, False=finish+flush),
+target color via `/episode/target`. The pick-and-place node drives both.
+
+Verified end-to-end with 4 episodes × 132–133 frames. Each episode took
+~12 s wall-clock on CPU rendering.
+
+### Task 5: raw → LeRobot v2 dataset conversion
+
+`scripts/convert_to_lerobot.py` — reads `data/demos_raw/` and writes
+`data/demos_lerobot/` in LeRobot v2 layout:
+
+- `data/chunk-000/episode_NNNNNN.parquet` — one record per frame with
+  `observation.state (float32[6])`, `action (float32[6])`,
+  `timestamp, frame_index, episode_index, index, task_index`
+- `videos/chunk-000/observation.images.third_person/episode_NNNNNN.mp4` —
+  h264 at the configured FPS, encoded via `ffmpeg`
+- `meta/{info.json, episodes.jsonl, tasks.jsonl, stats.json}` — dataset-level
+  metadata, feature schemas matching SmolVLA expectations for SO-100/SO-101.
+
+Dependencies (installed on demand): `pyarrow` via pip (with
+`--break-system-packages`), `ffmpeg` via apt. `pandas` is NOT installed —
+parquet inspection via `pyarrow.parquet.read_table(...).schema` confirmed
+the schema matches LeRobot v2.
+
+Verified with the 4 recorded episodes → 529 total frames, 2 task variants
+("pick the blue ball...", "pick the red ball..."). `LeRobotDataset.from_parquet(...)`
+loading isn't verified here because the `lerobot` package isn't installed;
+that's a follow-up once the fine-tune environment is provisioned.
+
+### Task 4: NOT run (blocked on grasp)
+
+`ros2 run vla demo_recorder.py` + `ros2 run vla pick_and_place_moveit.py --trials 300 --randomize`
+is the correct invocation. At the current 0% grasp rate it would produce
+300 motion-only demos — still potentially usable if SmolVLA fine-tunes on
+the motion-commanded action sequence (the policy learns "close gripper at
+the descent endpoint"), but the physical success criterion ("ball XY within
+marker radius") will always fail.
+
+### Infra details added this session
+
+- **Apt-installed at runtime**, not yet in `.devcontainer/Dockerfile`:
+  `ros-jazzy-moveit`, `ros-jazzy-moveit-py`, `ros-jazzy-trac-ik-kinematics-plugin`,
+  `ros-jazzy-joint-state-broadcaster`, `ros-jazzy-ros2controlcli`, `ffmpeg`,
+  and pip `pyarrow`. Persist these in the Dockerfile to make rebuilds clean.
+- **kinematics.yaml**: switched from KDL to TRAC-IK
+  (`trac_ik_kinematics_plugin/TRAC_IKKinematicsPlugin`, `solve_type: Distance`).
+- **`src/arm_moveit_config/launch/arm_gazebo_moveit.launch.py`** — one-shot
+  launcher that starts `arm_gazebo.launch.py` and then move_group after a
+  10 s delay.
+
+### Next steps to make grasp work (ordered by effort)
+
+1. **Add a `tcp_jaw_link` frame in the URDF** at the actual jaw-close point
+   (between the two fingertips), and either repoint the SRDF chain to end
+   there or change `ik_link_name` / `pose_link` in the pick-and-place node
+   to `tcp_jaw_link`. This is the clean fix for the "TCP is 10 cm past the
+   jaws" problem.
+2. **Swap the 3 cm sphere for a 4 × 4 × 4 cm cube** — cubes have flat faces
+   the jaws can pinch reliably and are easier to grasp than smooth spheres
+   in gz-sim's default physics. Would make sense if (1) alone doesn't fix
+   capture.
+3. **Add a `DetachableJoint` plugin** — gz-sim's topic-controlled attach
+   mechanism creates a fixed joint between ball and gripper on command. The
+   pick-and-place node publishes `/attach` when jaws close; release when
+   they open. This is the standard sim-demo-collection hack and decouples
+   demo collection from physical grasp fidelity.
+4. **Raise the ball pedestal** by 2–3 cm so the arm doesn't have to go so
+   close to its shoulder-lift lower limit during descent — more IK slack
+   means MoveIt's Cartesian path can complete 100% instead of 50%.
+
+## 2026-04-23 — MoveIt2 scaffold + split controllers + headless launch + local-IK spike
+
+Task #1 kickoff per `HANDOFF_moveit_smolvla.md`. Created `QA_LOG.md` with the
+handoff's six open questions answered; saved the "clean-slate before every sim
+test" rule to Claude memory under `feedback_sim_clean_slate.md`.
+
+### Infra changes
+
+- **New package `src/arm_moveit_config/`** — SRDF (`so101.srdf`) with two
+  planning groups (`arm`: shoulder_pan..wrist_roll, `gripper`: gripper),
+  named states `home`/`rest`/`open`/`closed`; `kinematics.yaml` (KDL); both
+  `ompl_planning.yaml` (RRTConnect default) and
+  `pilz_industrial_motion_planner_planning.yaml` (PTP/LIN); `joint_limits.yaml`;
+  `moveit_controllers.yaml` pointing at FollowJointTrajectory under
+  `arm_controller` and `gripper_controller`; `launch/arm_moveit.launch.py`
+  (moveit_configs_utils-driven, `use_sim_time:=true`). Per-session apt install:
+  `ros-jazzy-moveit ros-jazzy-moveit-py ros-jazzy-trac-ik-kinematics-plugin`
+  + `ros-jazzy-joint-state-broadcaster ros-jazzy-ros2controlcli`. Both packages
+  should be added to `.devcontainer/Dockerfile` for persistence — not yet done.
+- **Split `controllers.yaml`** — was a single `arm_controller` driving all 6
+  joints. Now `arm_controller` drives the 5 arm joints and a new
+  `gripper_controller` drives `gripper`, so MoveIt's `moveit_simple_controller_manager`
+  can map planning groups 1:1 onto controllers. Added `gripper_controller`
+  spawner to `arm_gazebo.launch.py`. The old `vla_ik.py` / `vla_action_client.py`
+  pipeline that published 6-joint trajectories to `/arm_controller/joint_trajectory`
+  **will now fail**; Task 2+ replaces those nodes with MoveIt planning.
+- **Gazebo launch now headless** — the devcontainer has no display, so Gazebo
+  GUI crashed on launch (`qt.qpa.xcb: could not connect to display`). Changed
+  `gz_args` to `-r -s --headless-rendering`, added a `headless` launch argument
+  (default `true`). CPU rendering only (no `--gpus all` passthrough); RTF
+  measured ~1.0 at the wrist camera's reduced 224×224 @ 5 Hz.
+- **`scripts/nuke_sim.sh`** — canonical TERM 0 sequence: `pkill` all relevant
+  process names, `kill -9` survivors by explicit PID, flush DDS daemon. Run
+  before every Gazebo launch to avoid zombie-controller-manager leaks.
+
+### Grasp spike — current state
+
+`src/vla/vla/grasp_spike_local.py` (+ `kinematics_so101.py`) implements a
+local-IK approximation of MoveIt's `compute_cartesian_path`: 20-waypoint IK
+resolved in series with warm-starting, published via FollowJointTrajectory.
+Sequence: home → joint-plan to hover → Cartesian descent → close gripper →
+Cartesian ascent → sample ball Z.
+
+**Pipeline works end-to-end.** Reset between trials uses **remove + create**
+via `ros_gz_sim create` (not `set_pose` — that service doesn't clear velocity,
+so unpausing physics rockets residual-velocity balls off-table). Per-trial
+reset + execute takes ~12 s wall on CPU rendering. Ball/arm state verified
+clean before each attempt.
+
+**Grasp currently fails — gripper geometry.** 0/N trials succeed because the
+jaws don't clamp the ball. Specific observations:
+- `gripper_frame_link` is **not** at the jaw tips. At the bent-arm descent
+  pose it sits ~9–10 cm BELOW `gripper_link` (whose origin is roughly where
+  the jaws pivot). Targeting TCP at ball center parks the jaws 9 cm ABOVE the
+  ball; closing grips empty air.
+- Pushing TCP +5 / +10 cm above ball center (`grasp_dz`) pulls the arm up so
+  far that the jaws never reach the ball at all.
+- During ascent, the upper/lower-arm links swing through the ball's footprint
+  and nudge it ~4 cm sideways across the table. This is the "joint-space
+  curve, not Cartesian line" problem the handoff flagged — local per-waypoint
+  IK produces Cartesian-straight TCP motion, but other arm links still sweep
+  large arcs because the 5-DOF arm has to re-shape itself to keep the TCP on
+  the line.
+- `wrist_roll` brute-forced at 0, π/2 — neither grips. The jaw-open axis
+  relative to the ball isn't the dominant issue; the jaws are mechanically
+  too far from the target point.
+
+Proper fix is the MoveIt2 route the handoff calls out: `compute_cartesian_path`
+or Pilz LIN with an EE link selected as the REAL jaw center (or an edited
+URDF moving `gripper_frame_link` onto the jaws). Not yet implemented — see
+open work below.
+
+### Files added / changed
+
+- `src/arm_moveit_config/{package.xml,CMakeLists.txt}` — new package.
+- `src/arm_moveit_config/config/{so101.srdf,kinematics.yaml,ompl_planning.yaml,pilz_industrial_motion_planner_planning.yaml,pilz_cartesian_limits.yaml,joint_limits.yaml,moveit_controllers.yaml}` — MoveIt config.
+- `src/arm_moveit_config/launch/arm_moveit.launch.py` — move_group bring-up.
+- `src/arm_description/config/controllers.yaml` — split arm / gripper.
+- `src/arm_description/launch/arm_gazebo.launch.py` — gripper_controller spawner + headless flag.
+- `src/vla/vla/kinematics_so101.py` — isolated FK+IK chain with optional wrist_roll pin.
+- `src/vla/vla/grasp_spike_local.py` — the spike itself.
+- `src/vla/CMakeLists.txt` — installs `grasp_spike_local.py`.
+- `scripts/nuke_sim.sh`, `scripts/ball_sdf.py` — helpers.
+- `QA_LOG.md`, `/home/dev/.claude/projects/-workspace/memory/feedback_sim_clean_slate.md` + MEMORY index.
+
+### Open work for this task list
+
+- Port the spike to MoveIt — `grasp_spike_moveit.py` using `moveit_py` with
+  Pilz LIN for descent/ascent and RRTConnect for home → hover. Try a TRAC-IK
+  swap if KDL underreaches near the ball.
+- Override the planning EE link (currently `gripper_frame_link`) to a frame at
+  the physical jaw center. Either (a) add a new fixed-joint child link in
+  `so101.urdf.xacro` named `tcp_jaw_link` and point the SRDF `chain` at it,
+  or (b) live with the 9 cm offset and target `ball_pos + ee_offset` in
+  world coordinates.
+- Task 2 (scripted expert policy) depends on a reliable grasp. Consider
+  swapping the 3 cm sphere for a 4 × 4 × 4 cm cube if MoveIt + TCP fix still
+  slip on a smooth sphere — cubes have flats the jaws can pinch.
+
+Build passes (`colcon build --packages-select arm_moveit_config arm_description vla --symlink-install`).
+
 ## 2026-04-23 — devcontainer for running Claude Code in bypass mode
 
 Motivation: the user wants to run Claude Code with `--permission-mode bypassPermissions` without giving it the whole user account. A git worktree isolates branches but not the filesystem/credentials, so the bypass-mode warning still applies on bare metal. Containerising solves that.

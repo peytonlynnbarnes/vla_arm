@@ -17,6 +17,9 @@ install(PROGRAMS
   vla/fake_vla_action_client.py
   vla/action_to_ee.py
   vla/vla_ik.py
+  vla/grasp_spike_local.py
+  vla/pick_and_place_moveit.py
+  vla/demo_recorder.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

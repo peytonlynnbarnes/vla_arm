@@ -1,3 +1,11 @@
 build
 install
 log
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Claude runtime state
+.claude/scheduled_tasks.lock

@@ -1,0 +1,110 @@
+# run_commands_moveit.txt — bring-up for the MoveIt2 + SmolVLA demo-collection stack
+#
+# Assumptions:
+#   - devcontainer running (see .devcontainer/README); working dir /workspace
+#   - ROS 2 Jazzy auto-sourced via BASH_ENV
+#   - MoveIt2 installed (apt-install below; not yet in Dockerfile)
+#
+# Apt bits that aren't in the base image yet (persist in Dockerfile to avoid):
+#   sudo apt-get update
+#   sudo apt-get install -y \
+#       ros-jazzy-moveit ros-jazzy-moveit-py \
+#       ros-jazzy-trac-ik-kinematics-plugin \
+#       ros-jazzy-joint-state-broadcaster ros-jazzy-ros2controlcli \
+#       ffmpeg
+#   pip install pyarrow --break-system-packages
+
+
+# =============================================================================
+# Full teardown — run before every session to avoid zombie controller_managers
+# =============================================================================
+bash /workspace/scripts/nuke_sim.sh
+
+
+# =============================================================================
+# Build the workspace
+# =============================================================================
+colcon build --symlink-install
+source install/setup.bash
+
+
+# =============================================================================
+# Option A — Gazebo + MoveIt in a single launch (for demo collection)
+# =============================================================================
+ros2 launch arm_moveit_config arm_gazebo_moveit.launch.py
+
+# After ~10-15 s check that move_group is up:
+# - `ros2 service list | grep move_group` should show compute_ik, compute_cartesian_path
+# - `ros2 control list_controllers` should show arm_controller, gripper_controller,
+#   joint_state_broadcaster all "active"
+# - `gz model -m blue_ball -p` should show pose (0.16, 0.08, 0.11)
+
+
+# =============================================================================
+# Option B — Gazebo only (no MoveIt; faster spin-up for local-IK spike)
+# =============================================================================
+ros2 launch arm_description arm_gazebo.launch.py
+
+
+# =============================================================================
+# Demo collection: recorder + expert policy
+# =============================================================================
+# Terminal 1 — recorder (long-running, writes data/demos_raw/episode_NNNN/)
+ros2 run vla demo_recorder.py \
+    --ros-args \
+    -p output_dir:=/workspace/data/demos_raw \
+    -p record_rate_hz:=10.0
+
+# Terminal 2 — expert policy (drives 300 episodes, both colors, randomized)
+ros2 run vla pick_and_place_moveit.py --trials 300 --randomize --seed 0
+
+# Alternative — just run a few episodes to sanity-check:
+ros2 run vla pick_and_place_moveit.py --target blue_ball --trials 3 --randomize
+
+
+# =============================================================================
+# Standalone local-IK grasp spike (bypasses MoveIt; Task-1 debug tool)
+# =============================================================================
+ros2 run vla grasp_spike_local.py --ball blue_ball --trials 5
+
+
+# =============================================================================
+# Convert recorded demos to LeRobot v2 format
+# =============================================================================
+python3 /workspace/scripts/convert_to_lerobot.py \
+    --input-dir /workspace/data/demos_raw \
+    --output-dir /workspace/data/demos_lerobot \
+    --fps 10
+
+# The resulting /workspace/data/demos_lerobot/ can then be `LeRobotDataset.from_root(...)`
+# loaded by SmolVLA training scripts.
+
+
+# =============================================================================
+# Diagnostics
+# =============================================================================
+# Arm + ball state
+ros2 topic echo /joint_states --once
+gz model -m blue_ball -p
+ros2 run tf2_ros tf2_echo base_link gripper_frame_link
+
+# MoveIt services
+ros2 service list | grep -E "compute_ik|compute_cartesian|plan_kinematic"
+
+# RTF — must be run while sim is up
+gz topic -e -t /stats -n 5
+
+# Manual reset (arm joints only; does NOT reset free bodies like balls)
+gz service -s /world/balls_world/control \
+    --reqtype gz.msgs.WorldControl \
+    --reptype gz.msgs.Boolean \
+    --timeout 2000 \
+    --req 'reset: {model_only: true}'
+
+# Respawn a ball (the reliable way to reset ball position + zero velocity)
+gz service -s /world/balls_world/remove \
+    --reqtype gz.msgs.Entity --reptype gz.msgs.Boolean --timeout 2000 \
+    --req 'name: "blue_ball", type: MODEL'
+ros2 run ros_gz_sim create -world balls_world \
+    -file /workspace/src/arm_description/worlds/blue_ball_standalone.sdf \
+    -name blue_ball -x 0.16 -y 0.08 -z 0.11

@@ -227,6 +227,27 @@
     </inertial>
   </link>
 
+  <!-- tcp_jaw_link: synthetic frame placed at the approximate jaw-close point
+       so MoveIt + local IK can plan pick poses that put the physical jaws, not
+       the (offset) gripper_frame_link, around the target object. Offsets were
+       derived from inspecting the fixed offsets of the stationary finger
+       (wrist_roll_follower_so101_v1 at gripper_link origin) and moving_jaw
+       origin (at +0.020, +0.019, -0.023 in gripper_link frame). Placed at the
+       midpoint and pushed outward along -Z (gripper's approach direction). -->
+  <link name="tcp_jaw_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1e-9"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+
+  <joint name="tcp_jaw_joint" type="fixed">
+    <origin xyz="0.012 0.010 -0.035" rpy="0 0 0"/>
+    <parent link="gripper_link"/>
+    <child link="tcp_jaw_link"/>
+  </joint>
+
   <link name="moving_jaw_so101_v1_link">
     <xacro:inertial_block
       xyz="-0.00157495 -0.0300244 0.0192755"
@@ -377,6 +398,33 @@
         <argument>-p</argument>
         <argument>use_sim_time:=true</argument>
       </ros>
+    </plugin>
+
+    <!-- DetachableJoint plugins: one per graspable object. When an /attach_{color}
+         message is published (gz.msgs.Empty), a fixed joint is created between
+         gripper_link and that ball's link. /detach_{color} removes it. Used by the
+         expert policy to enforce reliable grasp during sim demo collection — the
+         VLA learns motion patterns, and physical-grasp realism isn't critical. -->
+    <plugin filename="gz-sim-detachable-joint-system"
+            name="gz::sim::systems::DetachableJoint">
+      <parent_link>gripper_link</parent_link>
+      <child_model>blue_ball</child_model>
+      <child_link>link</child_link>
+      <attach_topic>/attach_blue</attach_topic>
+      <detach_topic>/detach_blue</detach_topic>
+      <output_topic>/attach_blue_state</output_topic>
+      <suppress_child_warning>true</suppress_child_warning>
+    </plugin>
+
+    <plugin filename="gz-sim-detachable-joint-system"
+            name="gz::sim::systems::DetachableJoint">
+      <parent_link>gripper_link</parent_link>
+      <child_model>red_ball</child_model>
+      <child_link>link</child_link>
+      <attach_topic>/attach_red</attach_topic>
+      <detach_topic>/detach_red</detach_topic>
+      <output_topic>/attach_red_state</output_topic>
+      <suppress_child_warning>true</suppress_child_warning>
     </plugin>
   </gazebo>
 
