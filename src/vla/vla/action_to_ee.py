@@ -119,14 +119,13 @@ class ActionToEE(Node):
             self.get_logger().warn(f'Expected 7 action values, got {len(data)}')
             return
 
-        raw_dx = clamp(data[0] * self.translation_scale, -self.max_translation_step, self.max_translation_step)
-        raw_dy = clamp(data[1] * self.translation_scale, -self.max_translation_step, self.max_translation_step)
-        raw_dz = clamp(data[2] * self.translation_scale, -self.max_translation_step, self.max_translation_step)
+        dx = clamp(data[0] * self.translation_scale, -self.max_translation_step, self.max_translation_step)
+        dy = clamp(data[1] * self.translation_scale, -self.max_translation_step, self.max_translation_step)
+        dz = clamp(data[2] * self.translation_scale, -self.max_translation_step, self.max_translation_step)
 
-        # better debug mapping guess
-        dx = 0.2 * raw_dx
-        dy = -1.0 * raw_dx
-        dz = 1.0 * raw_dy
+        droll = clamp(data[3] * self.rotation_scale, -self.max_rotation_step, self.max_rotation_step)
+        dpitch = clamp(data[4] * self.rotation_scale, -self.max_rotation_step, self.max_rotation_step)
+        dyaw = clamp(data[5] * self.rotation_scale, -self.max_rotation_step, self.max_rotation_step)
 
         gripper = float(data[6])
 
@@ -152,9 +151,7 @@ class ActionToEE(Node):
             tf_msg.transform.rotation.w,
         ])
 
-        # interpret translation delta in EE local frame, rotate into base frame
-        delta_world = rotate_vector_by_quat([dx, dy, dz], cur_quat)
-
+        # translation deltas are interpreted in base frame (identity pass-through)
         target_pos = [
             cur_pos[0] + dx,
             cur_pos[1] + dy,

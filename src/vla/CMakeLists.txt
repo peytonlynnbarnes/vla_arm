@@ -13,14 +13,15 @@ ament_python_install_package(${PROJECT_NAME})
 
 # Install executable Python node scripts
 install(PROGRAMS
-  vla/vla_action_client.py 
+  vla/vla_action_client.py
+  vla/fake_vla_action_client.py
   vla/action_to_ee.py
   vla/vla_ik.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install launch and config files
-install(DIRECTORY launch config
+# Install launch files
+install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 

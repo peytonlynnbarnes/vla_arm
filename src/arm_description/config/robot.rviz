@@ -31,7 +31,7 @@ Visualization Manager:
       Name: CameraImage
       Enabled: true
       Topic:
-        Value: /camera/image_raw
+        Value: /third_person/image_raw
 
   Global Options:
     Fixed Frame: base_link

@@ -33,3 +33,5 @@ ros2 run your_package vla_action_client \
   -p instruction:="pick up the red ball" \
   -p server_url:=http://127.0.0.1:8000/act \
   -p unnorm_key:=bridge_orig
+
+  openconnect-sso --server secure.vpn.ucf.edu -- '--script=vpn-slice nobel.ece.ucf.edu'

@@ -2,8 +2,8 @@
 <sdf version="1.9">
   <world name="balls_world">
 
-    <physics name="1ms" type="ignored">
-      <max_step_size>0.001</max_step_size>
+    <physics name="4ms" type="ignored">
+      <max_step_size>0.004</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
 
@@ -16,8 +16,8 @@
     <plugin
       filename="gz-sim-scene-broadcaster-system"
       name="gz::sim::systems::SceneBroadcaster"/>
-    <plugin 
-      filename="gz-sim-sensors-system" 
+    <plugin
+      filename="gz-sim-sensors-system"
       name="gz::sim::systems::Sensors"/>
     <light type="directional" name="sun">
       <cast_shadows>true</cast_shadows>
@@ -53,9 +53,34 @@
       </link>
     </model>
 
+    <model name="table">
+      <static>true</static>
+      <pose>0.25 0.0 0.04 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <box>
+              <size>0.30 0.40 0.08</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.30 0.40 0.08</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.5 0.35 0.2 1</ambient>
+            <diffuse>0.55 0.4 0.25 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
     <model name="red_ball">
       <static>false</static>
-      <pose>0.35 -0.12 0.03 0 0 0</pose>
+      <pose>0.16 -0.08 0.11 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>0.05</mass>
@@ -89,45 +114,9 @@
       </link>
     </model>
 
-    <model name="green_ball">
-      <static>false</static>
-      <pose>0.45 0.0 0.03 0 0 0</pose>
-      <link name="link">
-        <inertial>
-          <mass>0.05</mass>
-          <inertia>
-            <ixx>0.00002</ixx>
-            <iyy>0.00002</iyy>
-            <izz>0.00002</izz>
-            <ixy>0</ixy>
-            <ixz>0</ixz>
-            <iyz>0</iyz>
-          </inertia>
-        </inertial>
-        <collision name="collision">
-          <geometry>
-            <sphere>
-              <radius>0.03</radius>
-            </sphere>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <sphere>
-              <radius>0.03</radius>
-            </sphere>
-          </geometry>
-          <material>
-            <ambient>0 1 0 1</ambient>
-            <diffuse>0 1 0 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
     <model name="blue_ball">
       <static>false</static>
-      <pose>0.35 0.12 0.03 0 0 0</pose>
+      <pose>0.16 0.08 0.11 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>0.05</mass>
@@ -195,6 +184,80 @@
             <diffuse>1 0 0 1</diffuse>
           </material>
         </visual>
+      </link>
+    </model>
+
+    <!-- Fixed place-target: green disc on the table. Visual-only (no
+         collision) so a ball released above it simply lands on the table
+         at the same XY; placement success is a 2-D test, not stacked. -->
+    <model name="place_target">
+      <static>true</static>
+      <pose>0.22 0.00 0.085 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.01</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.10 0.65 0.20 1</ambient>
+            <diffuse>0.15 0.85 0.25 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Fixed third-person RGB camera. Positioned to view the arm + table
+         from roughly the same viewpoint as Bridge V2 training data
+         (over-the-shoulder, looking down at the tabletop). Publishes to
+         /third_person/image_raw at 224x224 @ 5 Hz for OpenVLA. -->
+    <model name="third_person_camera">
+      <static>true</static>
+      <pose>0.70 0.00 0.50 0 0.81 3.14159</pose>
+      <link name="link">
+        <inertial>
+          <mass>0.01</mass>
+          <inertia>
+            <ixx>1e-6</ixx>
+            <iyy>1e-6</iyy>
+            <izz>1e-6</izz>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <visual name="visual">
+          <geometry>
+            <box>
+              <size>0.04 0.04 0.03</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.1 0.1 1</ambient>
+            <diffuse>0.1 0.1 0.1 1</diffuse>
+          </material>
+        </visual>
+        <sensor name="third_person" type="camera">
+          <always_on>true</always_on>
+          <visualize>false</visualize>
+          <update_rate>5</update_rate>
+          <topic>third_person/image_raw</topic>
+          <camera>
+            <horizontal_fov>1.3</horizontal_fov>
+            <image>
+              <width>224</width>
+              <height>224</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.05</near>
+              <far>5.0</far>
+            </clip>
+          </camera>
+        </sensor>
       </link>
     </model>
 

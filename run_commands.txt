@@ -1,0 +1,200 @@
+# run_commands.txt — end-to-end bring-up of the OpenVLA + Gazebo + SO-101 stack
+#
+# Assumptions:
+#   - ROS 2 Jazzy is at /opt/ros/jazzy
+#   - Project root is /home/peyton-peyton/vla_arm
+#   - The .venv at /home/peyton-peyton/vla_arm/.venv has `json_numpy` installed
+#     (system python3 does NOT). See step VLA.0 below.
+#   - The OpenVLA inference server is reachable over an SSH tunnel on :8000.
+#
+# Run each "TERM" block in its own terminal (or the same one sequentially for
+# the kill/verify blocks). Blocks labelled "(once)" are one-time setup.
+
+
+# =============================================================================
+# TERM 0 — Kill everything from a prior session (always safe to run first)
+# =============================================================================
+# This is the only reliable way to recover from zombie sims: my repeated
+# pkill/relaunch cycles earlier left parallel gz sim servers + ghost
+# controller_manager entries on DDS, which caused "Controller already loaded,
+# skipping load_controller" → FATAL on every subsequent launch.
+
+set +e
+pkill -9 -f "ros2 launch"        2>/dev/null || true
+pkill -9 -f "ros2 run"           2>/dev/null || true
+pkill -9 -f "gz sim"             2>/dev/null || true
+pkill -9 -f "ruby.*gz_tools"     2>/dev/null || true
+pkill -9 -f "parameter_bridge"   2>/dev/null || true
+pkill -9 -f "robot_state_publisher" 2>/dev/null || true
+pkill -9 -f "controller_manager" 2>/dev/null || true
+pkill -9 -f "ros2cli.daemon"     2>/dev/null || true
+pkill -9 -f "vla_action_client"  2>/dev/null || true
+pkill -9 -f "action_to_ee"       2>/dev/null || true
+pkill -9 -f "vla_ik"             2>/dev/null || true
+sleep 4
+
+# If anything survives (pkill -f won't match processes whose parent is PID 1
+# once their launcher dies), kill by explicit PID from this list:
+ps -ef | grep -E "gz sim|parameter_bridge|robot_state_publisher|ruby.*gz|vla_|python.*vla" | grep -v grep
+
+# Then:
+#   kill -9 <pid1> <pid2> ...
+# For example (REPLACE pids):
+#   kill -9 40271 40272 40273 40274 40275 40331 40332
+
+# Optional: reset ros2 daemon so stale DDS entries can't confuse the next
+# controller_manager. Only needed after a sim crash.
+source /opt/ros/jazzy/setup.bash
+ros2 daemon stop 2>&1 || true
+sleep 2
+ros2 daemon start 2>&1
+
+
+# =============================================================================
+# TERM 1 — Build the workspace (once after code edits)
+# =============================================================================
+
+cd /home/peyton-peyton/vla_arm
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install
+# ...or just one package:
+# colcon build --packages-select arm_description --symlink-install
+# colcon build --packages-select vla --symlink-install
+
+
+# =============================================================================
+# TERM 2 — SSH tunnel to the OpenVLA server (keep this running)
+# =============================================================================
+# Forwards localhost:8000 to the VLA inference server.
+ssh -L 8000:localhost:8000 pe606840@nobel.ece.ucf.edu
+
+# On the remote host, if the server isn't already up:
+#   python vla-scripts/deploy.py --openvla_path openvla/openvla-7b --host 0.0.0.0 --port 8000
+
+
+# =============================================================================
+# TERM 3 — One-shot bring-up: Gazebo + controllers + VLA pipeline
+# =============================================================================
+# Preferred path. Bundles arm_gazebo.launch.py + vla.launch.py with a 15 s
+# delay between them (so controllers are up before VLA starts) and injects
+# the venv site-packages into PYTHONPATH so json_numpy imports in the VLA
+# nodes. This replaces the old two-terminal flow.
+
+cd /home/peyton-peyton/vla_arm
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 launch vla vla_full.launch.py
+
+# Optional overrides:
+#   venv_site_packages:=/path/to/some/other/venv/site-packages
+#   vla_start_delay:=20.0        # bump if controllers take longer to activate
+#   render_engine:=ogre          # CPU fallback if GPU path misbehaves
+
+# IMPORTANT: the spawner for arm_controller may log:
+#   FATAL "Failed loading controller arm_controller"
+# This error is COSMETIC when controllers.yaml is present — gz_ros2_control
+# auto-loads+activates both controllers from the YAML, so the spawner's
+# redundant load_controller call hits "already loaded" and emits FATAL, but
+# the controllers are actually up. Verify in another terminal:
+#   ros2 control list_controllers
+# should show arm_controller and joint_state_broadcaster both `active`.
+
+
+# =============================================================================
+# TERM 3 (alt) — Run Gazebo and VLA separately (for debugging one side)
+# =============================================================================
+# Use this if you want to start the sim alone, or restart the VLA pipeline
+# without tearing down Gazebo. The one-shot launch above is usually simpler.
+
+# Just Gazebo:
+cd /home/peyton-peyton/vla_arm
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 launch arm_description arm_gazebo.launch.py
+
+# Just VLA (requires sim + venv on PYTHONPATH):
+cd /home/peyton-peyton/vla_arm
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+export PYTHONPATH="/home/peyton-peyton/vla_arm/.venv/lib/python3.12/site-packages:$PYTHONPATH"
+python3 -c "import json_numpy; print('json_numpy:', json_numpy.__file__)"   # sanity
+ros2 launch vla vla.launch.py
+
+
+# =============================================================================
+# VERIFICATION COMMANDS (run in any terminal with ROS sourced)
+# =============================================================================
+
+# Sim + RTF
+cd /home/peyton-peyton/vla_arm && source /opt/ros/jazzy/setup.bash && source install/setup.bash
+
+ros2 topic list | sort
+ros2 control list_controllers
+ros2 topic echo --once /clock
+timeout 8 gz topic -e -t /stats -n 3 2>&1 | grep real_time_factor
+ros2 topic hz /third_person/image_raw     # expect ~5 Hz
+
+# VLA server reachable (over the SSH tunnel)
+curl -s -o /dev/null -w "code=%{http_code} time=%{time_total}s\n" --max-time 3 http://127.0.0.1:8000/
+# 404 on `/` is normal — the real endpoint is POST /act.
+
+# Pipeline liveness (all three should be flowing once VLA is up)
+ros2 topic hz /vla_action
+ros2 topic hz /vla_target_pose
+ros2 topic hz /arm_controller/joint_trajectory
+
+# Joint motion snapshot
+ros2 topic echo --once /joint_states
+
+# GPU usage sanity (Gazebo should appear in the Processes list as a `G` client)
+nvidia-smi
+
+
+# =============================================================================
+# MANUAL ARM TEST (without VLA — useful to confirm controllers work)
+# =============================================================================
+
+ros2 topic pub /arm_controller/joint_trajectory trajectory_msgs/msg/JointTrajectory "
+joint_names: ['shoulder_pan','shoulder_lift','elbow_flex','wrist_flex','wrist_roll','gripper']
+points:
+- positions: [0.0, -1.0, 1.0, 0.5, 0.0, 0.0]
+  time_from_start: {sec: 2}
+" --once
+
+
+# =============================================================================
+# DEBUG — view the third-person camera live
+# =============================================================================
+
+ros2 run rqt_image_view rqt_image_view /third_person/image_raw
+
+
+# =============================================================================
+# NOTES ON KNOWN GOTCHAS
+# =============================================================================
+#
+# 1. The VLA trajectory targets in your last run walked around
+#      (x ≈ 0.44–0.47, y ≈ -0.05, z ≈ 0.22)
+#    while the blue ball sits at (0.22, +0.10, 0.11). OpenVLA doesn't
+#    "know" where the blue ball is in this scene (SO-101 + colored spheres
+#    are OOD for bridge_orig / Bridge V2 training data).
+#    Mitigations:
+#      - set translation_scale ≈ 0.01 in action_to_ee (shrink delta magnitude)
+#      - seed a "home pose" that hovers the gripper near the ball before
+#        VLA takes over, so VLA's small corrections can actually close the gap
+#      - accept that without fine-tuning this pipeline demonstrates the
+#        PLUMBING, not task competency.
+#
+# 2. If you change ros2_control controllers.yaml or the URDF's
+#    <ros2_control> block, you MUST rebuild arm_description AND restart
+#    Gazebo — gz_ros2_control reads these at plugin init only.
+#
+# 3. If you see "Controller already loaded" + "Failed to configure" and
+#    `ros2 control list_controllers` shows "No controllers are currently
+#    loaded!" (not both active), you almost certainly have a ghost
+#    controller_manager from a prior sim — go back to TERM 0 and reset the
+#    ros2 daemon.
+#
+# 4. Physics step in ball_world.sdf is 0.004 s (4 ms). Smaller values (e.g.
+#    0.001) drop RTF proportionally. Don't touch unless you need finer
+#    contact resolution.

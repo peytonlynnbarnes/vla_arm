@@ -45,8 +45,8 @@ def generate_launch_description():
 
     declare_render_engine = DeclareLaunchArgument(
         'render_engine',
-        default_value='ogre',
-        description='Gazebo render engine (ogre or ogre2)'
+        default_value='ogre2',
+        description='Gazebo render engine (ogre=CPU, ogre2=GPU).'
     )
 
     declare_robot_name = DeclareLaunchArgument(
@@ -165,10 +165,10 @@ def generate_launch_description():
         output='screen'
     )
 
-    camera_bridge = Node(
+    third_person_bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
-        arguments=['/camera/image_raw@sensor_msgs/msg/Image[gz.msgs.Image'],
+        arguments=['/third_person/image_raw@sensor_msgs/msg/Image[gz.msgs.Image'],
         output='screen'
     )
 
@@ -199,7 +199,7 @@ def generate_launch_description():
         rsp,
         gazebo,
         clock_bridge,
-        camera_bridge,
+        third_person_bridge,
         delayed_spawn,
         delayed_controllers,
     ])
