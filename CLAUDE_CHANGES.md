@@ -2,6 +2,34 @@
 
 Human-readable log of changes Claude has applied. Newest entries at the top.
 
+## 2026-04-23 — Doc refresh: CLAUDE.md and README.md rewritten to current state
+
+Both docs were stuck describing the original OpenVLA-only pipeline (wrist
+camera → HTTP /act → EE-delta integration → analytic IK → arm_controller).
+That's now legacy; the active path is SmolVLA finetuning on MoveIt2-collected
+demos. Rewrote both:
+
+- `CLAUDE.md` — replaced the OpenVLA-centric "Workspace layout / Data flow /
+  Common commands / Gotchas / Key files" with a SmolVLA-primary structure.
+  Explicitly marks the OpenVLA trio as legacy. Adds:
+  - Three-package layout (`arm_moveit_config` was missing).
+  - Two pipeline diagrams (SmolVLA primary, OpenVLA legacy).
+  - Demo collection / filter / convert command set.
+  - SmolVLA finetune one-liner and pointer to `SMOLVLA_INSTALL.md`.
+  - Updated gotchas: spawn `z=0.2`, two controllers (arm + gripper),
+    `tcp_jaw_link` planning frame, DetachableJoint `<attach_topic>` quirk
+    + reset-via-`set_pose` requirement, MoveIt cartesian fallback,
+    red-ball drift, removed wrist camera.
+  - Mandatory clean-slate rule mirrored from the memory entry.
+  - Current status table (what's done / pending).
+  - Pointers to all three handoff docs + `QA_LOG.md`.
+- `README.md` — kept user-facing and short (~110 lines, was 211). Status
+  table up top, pipeline diagram, layout, build/run/collect/convert
+  commands, world table, diagnostics, links to deep-dive docs.
+
+No code changes. Pure documentation; the project state described is what
+already exists on disk.
+
 ## 2026-04-23 — Task 4 COMPLETE: 200 successful demos collected end-to-end
 
 Ran the batch-wrapper script `scripts/collect_200_demos.sh` to completion.

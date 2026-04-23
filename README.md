@@ -1,44 +1,73 @@
 # vla_arm
 
-A ROS 2 Jazzy workspace that drives a simulated **SO-101** 6-DOF arm with
-[OpenVLA](https://openvla.github.io). A wrist-mounted camera streams frames
-to a remote OpenVLA inference server; the returned 7D action (EE-frame
-deltas + gripper) is integrated onto the current end-effector pose, solved
-to joint positions, and sent to the arm in Gazebo.
+A ROS 2 Jazzy workspace for driving a simulated **SO-101** 6-DOF arm with a
+vision-language-action policy. The current focus is finetuning **SmolVLA**
+on Gazebo-collected pick-and-place demos. An older OpenVLA pipeline is
+still in the tree as a comparison baseline.
+
+## Pipeline
 
 ```
- Gazebo (SO-101 + wrist camera, ball_world)
-        │  /camera/image_raw
-        ▼
-  vla_action_client.py  ── HTTP /act ──►  OpenVLA server  (remote, SSH-tunneled)
-        │                                 returns [dx dy dz drx dry drz gripper]
-        │  /vla_action (Float32MultiArray, len 7)
-        ▼
-  action_to_ee.py   TF base_link ← gripper_frame_link; scale + clamp deltas;
-        │           integrate onto current EE pose
-        │  /vla_target_pose (PoseStamped)   + /vla_gripper (Float32)
-        ▼
-  vla_ik.py         analytic 3-DOF IK (pan, lift, elbow); wrist/gripper held at params
+arm_moveit_config (Gazebo + arm + controllers + move_group)
         │
-        │  /arm_controller/joint_trajectory
         ▼
-  gz_ros2_control  → joints move in Gazebo
+pick_and_place_moveit.py        scripted expert; uses MoveIt2's
+        │                       /compute_cartesian_path + /compute_ik,
+        │                       toggles a DetachableJoint for grasp
+        ▼
+demo_recorder.py                10 Hz sync of image + joint_state +
+        │                       commanded action → episode dirs
+        ▼
+scripts/convert_to_lerobot.py   → data/demos_lerobot_final/  (LeRobot v2)
+        │
+        ▼
+SmolVLA finetune                lerobot/smolvla_base + this dataset
+(planned, see SMOLVLA_INSTALL.md)
+        │
+        ▼
+smolvla_inference_node          (TODO) /third_person/image_raw +
+                                /joint_states → policy.select_action →
+                                /arm_controller + /gripper_controller
+                                joint_trajectory topics
+```
+
+## Status
+
+| Stage | State |
+| --- | --- |
+| Gazebo + URDF + ros2_control + MoveIt2 + DetachableJoint grasp | ✅ working |
+| Scripted expert + recorder + LeRobot converter | ✅ implemented |
+| 200 successful demos (`data/demos_lerobot_final/`, 44k frames) | ✅ collected |
+| SmolVLA training run | ⏳ recipe ready, not executed |
+| SmolVLA inference node | ⏳ designed, not written |
+| OpenVLA pipeline (`vla_action_client → action_to_ee → vla_ik`) | 🟡 stale (reads a wrist camera that no longer exists) |
+
+## Repository layout
+
+```
+src/
+  arm_description/      SO-101 URDF, Gazebo world, ros2_control config, base launchers
+  arm_moveit_config/    SRDF, kinematics/OMPL/Pilz config, combined sim+MoveIt launcher
+  vla/                  ROS nodes: scripted expert, recorder, kinematics helpers,
+                        legacy OpenVLA client trio
+scripts/                collect_200_demos.sh, filter_successful_demos.py,
+                        convert_to_lerobot.py, nuke_sim.sh
+data/demos_lerobot_final/   the canonical LeRobot v2 dataset (200 episodes, ~15 MB)
+SMOLVLA_INSTALL.md      install + training recipe end-to-end
+HANDOFF_*.md            phase-by-phase handoffs (demo collection, finetune)
+CLAUDE.md               internal notes for Claude Code agents
+CLAUDE_CHANGES.md       dated change log
 ```
 
 ## Requirements
 
-- Ubuntu 24.04 (Noble) or compatible, with an NVIDIA GPU recommended for
-  real-time Gazebo rendering.
-- **ROS 2 Jazzy** at `/opt/ros/jazzy` including:
-  - `ros-jazzy-ros-gz` (Gazebo Harmonic integration)
-  - `ros-jazzy-gz-ros2-control`
-  - `ros-jazzy-joint-state-broadcaster`
-  - `ros-jazzy-joint-trajectory-controller`
-  - `ros-jazzy-robot-state-publisher`, `ros-jazzy-xacro`, `ros-jazzy-rviz2`
-  - `ros-jazzy-cv-bridge`
-- Python: `requests`, `numpy`, `json-numpy` (install into the workspace
-  venv or system Python used by ROS).
-- Access to an OpenVLA inference server (see **OpenVLA server** below).
+- Ubuntu 24.04, ROS 2 **Jazzy** at `/opt/ros/jazzy`
+- `ros-jazzy-{ros-gz, gz-ros2-control, joint-state-broadcaster,
+  joint-trajectory-controller, robot-state-publisher, xacro, rviz2,
+  cv-bridge}`
+- For demo collection: `ros-jazzy-{moveit, moveit-py,
+  trac-ik-kinematics-plugin, ros2controlcli}`, `ffmpeg`, `pip install pyarrow`
+- NVIDIA GPU recommended for real-time Gazebo rendering
 
 ## Build
 
@@ -48,163 +77,108 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
-`--symlink-install` means URDF/xacro, launch, config, and world files are
-edited in place — no rebuild needed after tweaking them. Re-run
-`colcon build` after editing Python nodes or `CMakeLists.txt`.
+`--symlink-install` lets you edit URDF / launch / config / world files in
+place. Re-build only after editing Python nodes or `CMakeLists.txt`.
 
-## Running the simulation
+## Run
+
+**Always start with a clean slate.** Zombie controllers and
+`gz sim` orphans persist across crashes:
+
+```bash
+bash scripts/nuke_sim.sh
+```
+
+### Sim only (no MoveIt)
 
 ```bash
 ros2 launch arm_description arm_gazebo.launch.py
 ```
 
-This brings up:
+Brings up Gazebo (`ball_world.sdf`), the SO-101 arm spawned at `(0, 0,
+0.2)`, `arm_controller` (5 joints), `gripper_controller` (1 joint),
+`joint_state_broadcaster`, the third-person camera bridge
+(`/third_person/image_raw`, 224×224 @ 5 Hz), and the
+`/attach_{blue,red}` / `/detach_{blue,red}` bridges.
 
-- Gazebo Sim (`ogre2` render engine by default) with `ball_world.sdf`
-  (three colored balls on a ground plane).
-- The SO-101 arm spawned at the origin via `ros_gz_sim create`.
-- `robot_state_publisher` for TF.
-- `parameter_bridge` nodes for `/clock` and `/camera/image_raw` between
-  gz transport and ROS 2.
-- `joint_state_broadcaster` and `arm_controller`
-  (`JointTrajectoryController`) on the 6 joints: `shoulder_pan`,
-  `shoulder_lift`, `elbow_flex`, `wrist_flex`, `wrist_roll`, `gripper`.
+Useful args: `render_engine:=ogre` (CPU fallback), `world:=<path>`,
+`x:=`, `y:=`, `z:=` (spawn pose).
 
-Useful launch arguments:
-
-- `render_engine:=ogre` — fall back to the CPU renderer (slower, use only
-  if `ogre2` has driver issues).
-- `world:=<path>` — swap the SDF world.
-- `x:=`, `y:=`, `z:=` — spawn pose.
-
-To visualize the arm without physics:
+### Sim + MoveIt (for demo collection)
 
 ```bash
-ros2 launch arm_description arm_rviz2.launch.py
+ros2 launch arm_moveit_config arm_gazebo_moveit.launch.py
 ```
 
-This opens RViz with the URDF and a `joint_state_publisher_gui` for
-manual joint sliders.
-
-Measure real-time factor while the sim is running:
+### Collect demos
 
 ```bash
-gz topic -e -t /stats -n 5
+# Terminal 1 — recorder
+ros2 run vla demo_recorder.py --ros-args \
+    -p output_dir:=/workspace/data/demos_raw -p record_rate_hz:=10.0
+
+# Terminal 2 — expert
+ros2 run vla pick_and_place_moveit.py --trials 25 --randomize --seed 0
+
+# or batch wrapper that restarts the sim every 25 trials:
+bash scripts/collect_200_demos.sh --target 200
 ```
 
-## Running the VLA pipeline
-
-Make sure the OpenVLA server is reachable (see below) and the sim is
-running. The intended one-shot launcher is:
+### Convert + (eventually) train
 
 ```bash
+python3 scripts/convert_to_lerobot.py \
+    --input-dir /workspace/data/demos_successful \
+    --output-dir /workspace/data/demos_lerobot_final --fps 10
+```
+
+Training is a separate machine. See **`SMOLVLA_INSTALL.md`** for the
+venv + `lerobot[smolvla]` install, dataset transfer, and the
+`lerobot.scripts.train` invocation (~4 h on a single A100, 30k steps).
+
+### Legacy OpenVLA pipeline
+
+```bash
+ros2 launch arm_description arm_gazebo.launch.py
 ros2 launch vla vla.launch.py
 ```
 
-…which starts three nodes in series:
+Requires the OpenVLA `/act` server reachable at
+`http://127.0.0.1:8000/act`. The repo expects you to SSH-tunnel it from
+elsewhere — see `cmds.txt`. Note: `vla_action_client.py` defaults to
+`/camera/image_raw` (the old wrist camera, removed). Re-point it at
+`/third_person/image_raw` or re-add a wrist camera to revive it.
 
-1. `vla_action_client.py` — subscribes to `/camera/image_raw`, POSTs each
-   frame to OpenVLA with an instruction string (default:
-   `"pick up the red ball"`), clamps the returned translation/rotation
-   to safety limits, and publishes a 7D `Float32MultiArray` on
-   `/vla_action` plus a human-readable status on `/openvla/status`.
-2. `action_to_ee.py` — looks up the current end-effector pose via TF
-   (`base_link` → `gripper_frame_link`), integrates the 7D delta onto
-   it, and publishes the absolute target as `PoseStamped` on
-   `/vla_target_pose` (plus a `Float32` gripper value on
-   `/vla_gripper`).
-3. `vla_ik.py` — analytic 3-DOF IK on `shoulder_pan`, `shoulder_lift`,
-   `elbow_flex`. Wrist and gripper joints are driven from parameters.
-   Output goes to `/arm_controller/joint_trajectory`. A deadband
-   (`position_threshold`, `joint_threshold`) suppresses publishes when
-   the target hasn't meaningfully changed.
+## World
 
-The translation mapping inside `action_to_ee.py` is still experimental
-(see the "better debug mapping guess" in the source), and the
-`delta_world` TF-rotated delta it computes is currently unused — the
-frame convention for translation is in flux and worth auditing before
-trusting closed-loop behaviour. You can exercise the IK node on its
-own with a hand-published `/vla_target_pose`:
+| Object | Pose | Notes |
+| --- | --- | --- |
+| `red_ball`, `blue_ball` | `(0.16, ∓0.08, 0.11)` | Sphere visual r = 3 cm; **box** collision 5 cm cube (jaws can pinch reliably) |
+| `place_target` | `(0.22, 0, 0.085)` | Green disc r = 5 cm, visual-only |
+| `table` | `(0.25, 0, 0.04)` | 40×55×8 cm |
+| `third_person_camera` | `(0.70, 0, 0.50)`, RPY `(0, 0.81, π)` | HFOV 1.3, 224×224 @ 5 Hz, `/third_person/image_raw` |
+
+Success criterion used during collection: ball XY within 5 cm of marker
+(Z not checked).
+
+## Diagnostics
 
 ```bash
-ros2 run vla vla_ik.py
+gz topic -e -t /stats -n 5            # real-time factor (sim must be up)
+ros2 control list_controllers          # arm/gripper controllers + jsb
+gz model -m blue_ball -p              # ball pose; sanity-check resets
+ros2 run tf2_ros tf2_echo base_link tcp_jaw_link
+xacro src/arm_description/description/so101.urdf.xacro -o /tmp/so101.urdf
 ```
 
-## OpenVLA server
+## Where to read more
 
-The client POSTs JSON-encoded images to `http://127.0.0.1:8000/act`
-(see `server_url` inside `vla.launch.py`). The repo assumes the real
-server runs elsewhere and is reached over SSH port-forwarding. The
-canonical command is in `cmds.txt`:
-
-```bash
-ssh -L 8000:localhost:8000 pe606840@nobel.ece.ucf.edu
-# on the remote host:
-python vla-scripts/deploy.py \
-  --openvla_path openvla/openvla-7b \
-  --host 0.0.0.0 \
-  --port 8000
-```
-
-Payloads use the `json_numpy` protocol (`pip install json-numpy`) — the
-client calls `json_numpy.patch()` so `requests.post(json=...)` handles
-numpy arrays transparently. Requests time out after
-`timeout_sec` (default 120 s); if the tunnel is down every request will
-block for that long.
-
-## Repository layout
-
-```
-vla_arm/
-├── src/
-│   ├── arm_description/            SO-101 URDF, Gazebo world, ros2_control
-│   │   ├── description/            so101.urdf.xacro, camera.xacro
-│   │   ├── worlds/ball_world.sdf   Three balls on a ground plane
-│   │   ├── config/controllers.yaml joint_state_broadcaster + arm_controller
-│   │   ├── launch/                 arm_gazebo, arm_rviz2, rsp
-│   │   └── assets/                 STL/DAE meshes
-│   └── vla/                        VLA client nodes
-│       ├── vla/vla_action_client.py  camera → HTTP → /vla_action (Float32MultiArray)
-│       ├── vla/action_to_ee.py       /vla_action + TF → /vla_target_pose (PoseStamped)
-│       ├── vla/vla_ik.py             /vla_target_pose → /arm_controller/joint_trajectory
-│       └── launch/vla.launch.py      launches the three nodes above with inline params
-├── CLAUDE.md                       Internal notes for Claude Code agents
-├── CLAUDE_CHANGES.md               Session-by-session change log
-├── cmds.txt                        Handy one-liners (SSH tunnel, server start)
-└── .claude/                        Claude Code settings + hooks
-```
-
-## Key parameters
-
-All three VLA nodes are parameterized from inline dicts in
-`src/vla/launch/vla.launch.py`; the interesting knobs:
-
-`vla_action_client.py`
-- `instruction` — the natural-language task handed to OpenVLA (default
-  `"pick up the red ball"`).
-- `server_url`, `timeout_sec`, `unnorm_key` — server config.
-- `publish_rate_hz` — throttle; `0.0` publishes on every received
-  frame when idle.
-- `max_abs_translation`, `max_abs_rotation` — per-axis safety clamps
-  on the returned action (metres / radians).
-
-`action_to_ee.py`
-- `base_frame`, `ee_frame` — TF frames used to look up the current EE
-  pose (defaults `base_link` / `gripper_frame_link`).
-- `translation_scale`, `rotation_scale` — gain on the incoming delta.
-- `max_translation_step`, `max_rotation_step` — additional per-message
-  clamps.
-- `publish_gripper` — toggle `/vla_gripper` output.
-
-`vla_ik.py`
-- `upper_arm_length`, `lower_arm_length`, `shoulder_offset_{x,z}` —
-  link lengths for the analytic IK.
-- `wrist_flex`, `wrist_roll`, `gripper` — constant values for the
-  three joints this IK doesn't solve for.
-- `move_time_sec` — `time_from_start` on every published trajectory
-  point.
-- `position_threshold`, `joint_threshold` — deadband before a new
-  trajectory is published.
+- `CLAUDE.md` — full project context: every gotcha, every key file,
+  exhaustive command list. Read this if you're modifying the code.
+- `HANDOFF_moveit_smolvla.md` / `HANDOFF_smolvla_finetune.md` — what
+  prior sessions handed off, what's open.
+- `SMOLVLA_INSTALL.md` — finetune install and training recipe.
+- `CLAUDE_CHANGES.md` — dated log of every change.
 
 ## License
 
