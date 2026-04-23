@@ -2,6 +2,66 @@
 
 Human-readable log of changes Claude has applied. Newest entries at the top.
 
+## 2026-04-23 — SmolVLA fine-tune kicked off + OpenVLA pipeline fully removed
+
+Two-part change covering the live training run and the OpenVLA cleanup.
+
+**Training status:** 3k-step smoke fine-tune of `lerobot/smolvla_base`
+started on UCF nobel (`pe606840@nobel.ece.ucf.edu`) inside tmux session
+`smolvla`. Uses `train_relaxed.py` (added to the repo), a wrapper that
+monkey-patches LeRobot 0.3.3 to accommodate four issues in our dataset:
+
+1. Parquet timestamp jitter (~1%) tripping `check_timestamps_sync`.
+2. Video decoder `tolerance_s` default 1e-4s is too tight.
+3. Off-by-one between parquet rows and mp4 frames in some episodes
+   (real converter bug in `scripts/convert_to_lerobot.py`).
+4. `meta/stats.json` missing image keys (worked around with
+   `--dataset.use_imagenet_stats=false` since SigLIP brings its own
+   normalization).
+
+Version pinning: `lerobot[smolvla]==0.3.3`. 0.4.x requires dataset
+v3.0 which we don't have. Layout is flat (`lerobot.datasets.*`, not
+`lerobot.common.datasets.*`). Entry point is `python -m lerobot.scripts.train`
+(wrapped via `runpy` inside `train_relaxed.py`).
+
+**OpenVLA purge.** The OpenVLA legacy pipeline was called out as "stale
+but still in-tree" in older docs. Removed it entirely. Deleted:
+
+- `src/vla/vla/vla_action_client.py`
+- `src/vla/vla/fake_vla_action_client.py`
+- `src/vla/vla/action_to_ee.py`
+- `src/vla/vla/vla_ik.py`
+- `src/vla/launch/vla.launch.py`
+- `src/vla/launch/vla_fake.launch.py`
+- `src/vla/launch/vla_full.launch.py`
+- `HANDOFF_moveit_smolvla.md`, `HANDOFF_smolvla_finetune.md`,
+  `SMOLVLA_INSTALL.md`, `QA_LOG.md` (superseded by `NEXT_STEPS.md`)
+
+Updated:
+
+- `src/vla/CMakeLists.txt` — removed install entries for deleted
+  scripts + dropped the empty launch-install block.
+- `cmds.txt` — trimmed to SmolVLA-relevant commands only (launchers,
+  manual joint-trajectory, VPN + SSH).
+- `CLAUDE.md` — removed the dual-pipeline framing, the OpenVLA data-flow
+  diagram, the legacy-launch commands, and the gotchas that only
+  applied to OpenVLA (wrist camera, vla_ik reach clamp, legacy trio
+  file pointers). Updated Current Status to reflect the live training.
+  Rewrote the SmolVLA finetune section to point at `train_relaxed.py`
+  and `NEXT_STEPS.md`.
+- `README.md` — status table: removed OpenVLA row, added SmolVLA
+  fine-tune validated row. Dropped "Legacy OpenVLA pipeline" section,
+  "comparison baseline" framing, and `src/vla` description's mention
+  of the legacy trio. Pointer section now references `NEXT_STEPS.md`.
+- Added `NEXT_STEPS.md` — self-contained handoff for a future Claude
+  subagent. Covers: where training is right now, why `train_relaxed.py`
+  exists, the immediate four steps (verify smoke → full run → rsync
+  checkpoint → write inference node → closed-loop eval), known
+  gotchas discovered during this run, and DON'T-DOs.
+
+No functional change to anything still in-tree; the scripted expert,
+recorder, converter, kinematics helper, and grasp spike all remain.
+
 ## 2026-04-23 — Doc refresh: CLAUDE.md and README.md rewritten to current state
 
 Both docs were stuck describing the original OpenVLA-only pipeline (wrist

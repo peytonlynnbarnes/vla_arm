@@ -4,25 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is right now
 
-A ROS 2 Jazzy workspace for driving a simulated **SO-101** 6-DOF arm with a
-vision-language-action policy. The project has **two pipelines** living side
-by side:
-
-1. **SmolVLA pipeline (primary, current focus).** Finetune
-   `lerobot/smolvla_base` on Gazebo-collected pick-and-place demos. The
-   expert is a MoveIt2-driven scripted policy; the recorder captures
-   image + joint-state + action tuples into a LeRobot v2 dataset; the
-   finetuned policy is meant to run locally and emit absolute joint
-   positions directly.
-2. **OpenVLA pipeline (legacy, still wired but not the focus).** Streams a
-   wrist (or third-person) camera frame to a remote OpenVLA-7B
-   `/act` HTTP server, integrates the returned 7D EE-frame deltas onto
-   the current EE pose, and analytically solves IK to joint commands.
-   Useful as a comparison baseline.
-
-Treat the SmolVLA path as the active direction. Touch the OpenVLA nodes
-only when explicitly asked — they predate the MoveIt2 work and use a
-different action representation.
+A ROS 2 Jazzy workspace for driving a simulated **SO-101** 6-DOF arm with
+**SmolVLA**. Fine-tune `lerobot/smolvla_base` on Gazebo-collected
+pick-and-place demos, then run the resulting policy closed-loop in the
+sim. The expert is a MoveIt2-driven scripted policy; the recorder
+captures image + joint-state + action tuples into a LeRobot v2 dataset;
+the fine-tuned policy emits absolute joint positions directly.
 
 ## Workspace layout
 
@@ -34,12 +21,10 @@ ROS 2 **Jazzy** colcon workspace with three packages under `src/`:
 - `arm_moveit_config` — MoveIt2 configuration for SO-101: SRDF, KDL/TRAC-IK,
   OMPL + Pilz planning configs, controller bindings, and a one-shot launcher
   that brings up Gazebo + arm + controllers + `move_group` together.
-- `vla` — Python ROS 2 nodes. Contains the legacy OpenVLA client trio
-  (`vla_action_client.py` → `action_to_ee.py` → `vla_ik.py`), the SmolVLA-era
-  scripted expert (`pick_and_place_moveit.py`), the demo recorder
-  (`demo_recorder.py`), kinematic helpers (`kinematics_so101.py`), and
-  small spike / test utilities (`grasp_spike_local.py`,
-  `fake_vla_action_client.py`).
+- `vla` — Python ROS 2 nodes. Contains the scripted expert
+  (`pick_and_place_moveit.py`), the demo recorder (`demo_recorder.py`),
+  kinematic helpers (`kinematics_so101.py`), and a local grasp spike
+  (`grasp_spike_local.py`).
 
 All three use `ament_cmake` (not `ament_python`); `vla` installs its Python
 modules via `ament_python_install_package` and individual scripts via
@@ -97,34 +82,7 @@ data/demos_lerobot_final/  ──►  python -m lerobot.scripts.train
 ```
 
 There is no IK or EE-pose math in the SmolVLA inference path — the policy
-directly emits joint positions. That's why this pipeline is shorter than
-the OpenVLA one.
-
-## Data flow (OpenVLA pipeline — legacy)
-
-```
-Gazebo  ── /third_person/image_raw (or /camera/image_raw if wrist cam re-added)
-    │
-    ▼
-vla_action_client.py ── HTTP /act ─► OpenVLA server (remote, SSH-tunneled)
-        │                            returns [dx,dy,dz, drx,dry,drz, gripper]
-        │ /vla_action (Float32MultiArray, len 7)
-        ▼
-action_to_ee.py     looks up TF base_link ← gripper_frame_link;
-        │           scales+clamps deltas; integrates onto current pose
-        │ /vla_target_pose (PoseStamped) + /vla_gripper (Float32)
-        ▼
-vla_ik.py           analytic 3-DOF IK (pan, lift, elbow); wrist + gripper
-        │           held at parameter values; deadband suppresses no-op
-        │           publishes
-        ▼
-/arm_controller/joint_trajectory  → gz_ros2_control → joints in Gazebo
-```
-
-`vla_action_client.py` originally read a wrist camera (`/camera/image_raw`)
-that was removed when `camera.xacro` was deleted. To re-run the OpenVLA
-loop you'll either need to re-add a wrist camera or repoint the client at
-`/third_person/image_raw`.
+directly emits joint positions.
 
 ## Common commands
 
@@ -151,8 +109,8 @@ colcon build --packages-select arm_moveit_config --symlink-install
 # Gazebo + arm + controllers + move_group, one-shot (use this for demo collection)
 ros2 launch arm_moveit_config arm_gazebo_moveit.launch.py
 
-# Gazebo + arm + controllers only (no MoveIt — faster spin-up, used by the
-# legacy OpenVLA pipeline and by grasp_spike_local.py)
+# Gazebo + arm + controllers only (no MoveIt — faster spin-up, used by
+# grasp_spike_local.py and eventually the SmolVLA inference node)
 ros2 launch arm_description arm_gazebo.launch.py
 
 # Arm + RViz with joint sliders (no physics)
@@ -201,35 +159,31 @@ python3 scripts/convert_to_lerobot.py \
 The canonical artifact is **`data/demos_lerobot_final/`** — 200 episodes,
 44,202 frames, ~15 MB, LeRobot v2 schema.
 
-### SmolVLA finetune (NOT yet executed)
+### SmolVLA finetune (running on UCF nobel)
 
-See `SMOLVLA_INSTALL.md` for the install + training recipe end to end. The
-short version:
+Compute target is UCF nobel (`pe606840@nobel.ece.ucf.edu`). Training
+runs inside tmux session `smolvla` via a wrapper script that patches
+four LeRobot 0.3.3 / dataset incompatibilities (timestamp tolerance,
+video decoder tolerance, parquet/mp4 off-by-one, missing image stats).
+**Do not invoke `python -m lerobot.scripts.train` directly — use
+`train_relaxed.py`.** Full runbook in `NEXT_STEPS.md`.
+
+Short version:
 
 ```bash
-python3 -m venv ~/smolvla_env && source ~/smolvla_env/bin/activate
-pip install "lerobot[smolvla]"
-python -m lerobot.scripts.train \
-    --policy.type=smolvla \
-    --policy.pretrained_path=lerobot/smolvla_base \
-    --dataset.root=/path/to/demos_lerobot_final \
+# on nobel, inside ~/vla_smolvla with .venv active, inside tmux:
+CUDA_VISIBLE_DEVICES=0 python train_relaxed.py \
+    --policy.path=lerobot/smolvla_base \
+    --dataset.root=/home/pe606840/vla_smolvla/data/demos_lerobot_final \
     --dataset.repo_id=local/so101_pickplace_sim \
+    --dataset.use_imagenet_stats=false \
     --batch_size=64 --steps=30000 --eval_freq=-1 --save_freq=5000 \
-    --output_dir=outputs/smolvla_so101_full --policy.push_to_hub=false
+    --output_dir=outputs/train/smolvla_so101 \
+    --policy.push_to_hub=false --wandb.enable=false
 ```
 
-Compute is unconfirmed — the natural target is the UCF box that already
-hosts the OpenVLA inference server, but check with the user before
-scheduling 4 h of A100 time.
-
-### Legacy OpenVLA pipeline
-
-```bash
-ros2 launch arm_description arm_gazebo.launch.py    # no MoveIt needed
-ros2 launch vla vla.launch.py                        # client → action_to_ee → vla_ik
-```
-
-Requires the OpenVLA server reachable via the SSH tunnel in `cmds.txt`.
+`lerobot[smolvla]==0.3.3` — pin that version. 0.4.x restructured the
+dataset format to v3.0 and breaks on our v2.0 dataset.
 
 ### Diagnostics
 
@@ -303,17 +257,14 @@ third_person_camera  at (0.70, 0, 0.50), RPY (0, 0.81, π), HFOV 1.3,
 ## Gotchas / inconsistencies (will bite)
 
 1. **Spawn `z=0.2` is still the default.** `arm_gazebo.launch.py` spawns
-   the arm 20 cm off the floor. Combined with the new ball positions
-   (0.16, ±0.08, 0.11) the arm reach is comfortable, but if you change
-   the spawn or revert ball positions you may re-introduce the
-   "vla_ik.py reach clamp kicks in and the arm just fully extends"
-   failure mode the old gotcha called out.
+   the arm 20 cm off the floor. Combined with the ball positions
+   (0.16, ±0.08, 0.11) the arm reach is comfortable. Change either and
+   reach can go out of envelope.
 
 2. **Two controllers, not one.** The arm is split across two
    `joint_trajectory_controller` instances: `arm_controller` (5 arm
    joints) and `gripper_controller` (just `gripper`). The SmolVLA
-   inference node will need to fan its 6-D output across both topics. The
-   legacy `vla_ik.py` only publishes to `arm_controller`.
+   inference node will need to fan its 6-D output across both topics.
 
 3. **`tcp_jaw_link` is the planning frame, not `gripper_frame_link`.**
    `tcp_jaw_link` was added as a fixed child of `gripper_link` at
@@ -352,17 +303,11 @@ third_person_camera  at (0.70, 0, 0.50), RPY (0, 0.81, π), HFOV 1.3,
    knocked balls during approach). If you need balanced colors, fix the
    IK first.
 
-7. **Wrist camera (`/camera/image_raw`) no longer exists.**
-   `description/camera.xacro` was deleted; the world now publishes only
-   `/third_person/image_raw` (224×224 @ 5 Hz). The legacy
-   `vla_action_client.py` reads `/camera/image_raw` by default — re-point
-   it or re-add the wrist camera if you want to revive the OpenVLA loop.
-
-8. **`render_engine` default is `ogre2`** (GPU). Fall back to `ogre` only
+7. **`render_engine` default is `ogre2`** (GPU). Fall back to `ogre` only
    if you hit EGL/driver issues. In the devcontainer there's no GPU
    passthrough, so Gazebo falls back to `llvmpipe` and RTF drops hard.
 
-9. **`ros-jazzy-joint-trajectory-controller` and the MoveIt2 stack must
+8. **`ros-jazzy-joint-trajectory-controller` and the MoveIt2 stack must
    be installed** apt-side. See `run_commands_moveit.txt` for the full
    apt list (`ros-jazzy-moveit`, `ros-jazzy-moveit-py`,
    `ros-jazzy-trac-ik-kinematics-plugin`, `ros-jazzy-ros2controlcli`,
@@ -407,10 +352,6 @@ third_person_camera  at (0.70, 0, 0.50), RPY (0, 0.81, π), HFOV 1.3,
   `tcp_jaw_link`.
 - `src/vla/vla/grasp_spike_local.py` — standalone local-IK grasp test (no
   MoveIt). Useful for quickly debugging grip geometry.
-- `src/vla/vla/{vla_action_client,action_to_ee,vla_ik}.py` — the legacy
-  OpenVLA trio.
-- `src/vla/launch/vla.launch.py` — launches the OpenVLA trio with inline
-  parameter dicts.
 - `src/vla/CMakeLists.txt` — lists which scripts get installed; editing
   any `vla/vla/*.py` only survives `colcon build` if it's in
   `install(PROGRAMS ...)`.
@@ -430,15 +371,11 @@ third_person_camera  at (0.70, 0, 0.50), RPY (0, 0.81, π), HFOV 1.3,
 
 ### Handoffs + status
 
-- `HANDOFF_moveit_smolvla.md` — the demo-collection-phase handoff
-  (assumes the devcontainer; explains the MoveIt2 + scripted-expert
-  scope).
-- `HANDOFF_smolvla_finetune.md` — the finetune-phase handoff (what's
-  done, what the dataset looks like, the training command, open
-  questions).
-- `SMOLVLA_INSTALL.md` — install + training recipe end to end, plus an
-  air-gapped variant.
-- `QA_LOG.md` — open questions from earlier handoffs and the answers.
+- `NEXT_STEPS.md` — the active handoff. Covers: verifying the smoke
+  run, kicking off the 30k-step full run, downloading the checkpoint,
+  writing the inference node, closed-loop Gazebo eval, and every gotcha
+  discovered during the fine-tune (LeRobot version pinning, the
+  `train_relaxed.py` wrapper rationale, converter off-by-ones, etc.).
 - `CLAUDE_CHANGES.md` — dated log of every file change Claude has made,
   newest at top.
 
@@ -449,16 +386,15 @@ third_person_camera  at (0.70, 0, 0.50), RPY (0, 0.81, π), HFOV 1.3,
 - ✅ Scripted expert + recorder + LeRobot converter implemented.
 - ✅ 200 successful demos collected → `data/demos_lerobot_final/`
   (49 % success rate over 408 attempts, 143 blue / 57 red split).
-- ⏳ SmolVLA training — recipe documented, not executed. Compute target
-  unconfirmed.
-- ⏳ SmolVLA inference node — designed in `SMOLVLA_INSTALL.md` and
-  `HANDOFF_smolvla_finetune.md`, not yet written. Will subscribe to
+- ✅ SmolVLA fine-tune pipeline validated on UCF nobel A100 — 3k-step
+  smoke test running on `pe606840@nobel.ece.ucf.edu` in tmux session
+  `smolvla`, using `train_relaxed.py` (wrapper that patches four
+  LeRobot 0.3.3 / dataset incompatibilities — see `NEXT_STEPS.md`).
+- ⏳ Full 30k-step fine-tune — kicks off after smoke verifies. ~3 h on A100.
+- ⏳ SmolVLA inference node — not yet written. Will subscribe to
   `/third_person/image_raw` + `/joint_states`, call
   `policy.select_action`, and fan the 6-D output across `arm_controller`
   + `gripper_controller`.
-- 🟡 OpenVLA pipeline still present but stale: it reads a
-  `/camera/image_raw` topic that no longer exists since `camera.xacro`
-  was removed.
 
 ## Claude-specific conventions in this repo
 

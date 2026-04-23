@@ -1,9 +1,9 @@
 # vla_arm
 
 A ROS 2 Jazzy workspace for driving a simulated **SO-101** 6-DOF arm with a
-vision-language-action policy. The current focus is finetuning **SmolVLA**
-on Gazebo-collected pick-and-place demos. An older OpenVLA pipeline is
-still in the tree as a comparison baseline.
+vision-language-action policy. The pipeline fine-tunes **SmolVLA** on
+Gazebo-collected pick-and-place demos and runs the resulting policy
+closed-loop against the sim.
 
 ## Pipeline
 
@@ -22,7 +22,7 @@ scripts/convert_to_lerobot.py   → data/demos_lerobot_final/  (LeRobot v2)
         │
         ▼
 SmolVLA finetune                lerobot/smolvla_base + this dataset
-(planned, see SMOLVLA_INSTALL.md)
+(see NEXT_STEPS.md)
         │
         ▼
 smolvla_inference_node          (TODO) /third_person/image_raw +
@@ -38,9 +38,9 @@ smolvla_inference_node          (TODO) /third_person/image_raw +
 | Gazebo + URDF + ros2_control + MoveIt2 + DetachableJoint grasp | ✅ working |
 | Scripted expert + recorder + LeRobot converter | ✅ implemented |
 | 200 successful demos (`data/demos_lerobot_final/`, 44k frames) | ✅ collected |
-| SmolVLA training run | ⏳ recipe ready, not executed |
+| SmolVLA fine-tune pipeline | ✅ validated on UCF A100 — 3k-step smoke run on `nobel`, see `NEXT_STEPS.md` |
+| SmolVLA full 30k-step fine-tune | ⏳ next up after smoke verifies |
 | SmolVLA inference node | ⏳ designed, not written |
-| OpenVLA pipeline (`vla_action_client → action_to_ee → vla_ik`) | 🟡 stale (reads a wrist camera that no longer exists) |
 
 ## Repository layout
 
@@ -48,13 +48,11 @@ smolvla_inference_node          (TODO) /third_person/image_raw +
 src/
   arm_description/      SO-101 URDF, Gazebo world, ros2_control config, base launchers
   arm_moveit_config/    SRDF, kinematics/OMPL/Pilz config, combined sim+MoveIt launcher
-  vla/                  ROS nodes: scripted expert, recorder, kinematics helpers,
-                        legacy OpenVLA client trio
+  vla/                  ROS nodes: scripted expert, recorder, kinematics helpers
 scripts/                collect_200_demos.sh, filter_successful_demos.py,
                         convert_to_lerobot.py, nuke_sim.sh
 data/demos_lerobot_final/   the canonical LeRobot v2 dataset (200 episodes, ~15 MB)
-SMOLVLA_INSTALL.md      install + training recipe end-to-end
-HANDOFF_*.md            phase-by-phase handoffs (demo collection, finetune)
+NEXT_STEPS.md           active handoff — smoke run, full fine-tune, inference node, eval
 CLAUDE.md               internal notes for Claude Code agents
 CLAUDE_CHANGES.md       dated change log
 ```
@@ -132,22 +130,10 @@ python3 scripts/convert_to_lerobot.py \
     --output-dir /workspace/data/demos_lerobot_final --fps 10
 ```
 
-Training is a separate machine. See **`SMOLVLA_INSTALL.md`** for the
-venv + `lerobot[smolvla]` install, dataset transfer, and the
-`lerobot.scripts.train` invocation (~4 h on a single A100, 30k steps).
-
-### Legacy OpenVLA pipeline
-
-```bash
-ros2 launch arm_description arm_gazebo.launch.py
-ros2 launch vla vla.launch.py
-```
-
-Requires the OpenVLA `/act` server reachable at
-`http://127.0.0.1:8000/act`. The repo expects you to SSH-tunnel it from
-elsewhere — see `cmds.txt`. Note: `vla_action_client.py` defaults to
-`/camera/image_raw` (the old wrist camera, removed). Re-point it at
-`/third_person/image_raw` or re-add a wrist camera to revive it.
+Training runs on UCF nobel (A100). See **`NEXT_STEPS.md`** for the
+runbook: venv + `lerobot[smolvla]==0.3.3`, dataset rsync, and the
+`train_relaxed.py` wrapper invocation (~3 h on A100 at batch 64 for
+30k steps).
 
 ## World
 
@@ -175,9 +161,8 @@ xacro src/arm_description/description/so101.urdf.xacro -o /tmp/so101.urdf
 
 - `CLAUDE.md` — full project context: every gotcha, every key file,
   exhaustive command list. Read this if you're modifying the code.
-- `HANDOFF_moveit_smolvla.md` / `HANDOFF_smolvla_finetune.md` — what
-  prior sessions handed off, what's open.
-- `SMOLVLA_INSTALL.md` — finetune install and training recipe.
+- `NEXT_STEPS.md` — active handoff: smoke run verification, full
+  fine-tune command, checkpoint rsync, inference-node spec, eval loop.
 - `CLAUDE_CHANGES.md` — dated log of every change.
 
 ## License
