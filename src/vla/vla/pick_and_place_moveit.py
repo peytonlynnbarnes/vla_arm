@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
-"""Scripted pick-and-place via MoveIt2 services for SO-101.
+"""Scripted pick-and-place for SO-101 via hand-tuned joint keyframes.
 
-Uses /compute_ik and /compute_cartesian_path services exposed by move_group,
-plus direct FollowJointTrajectory action execution. This bypasses MoveItPy
-(which requires the full planning-pipeline config duplicated in this node's
-parameter namespace) and talks to the already-running move_group.
+No MoveIt planning, no IK: each episode is a fixed joint-goal sequence
+captured with `scripts/joint_sliders.py`. MoveIt's /compute_cartesian_path
+was unreliable on this 5-DOF arm (fraction<1.0 ~90% of descents) and the
+local-IK fallback placed TCP 3-6 cm above the cube. The keyframe path is
+simpler, faster, and ~100% reliable at the canonical ball position.
 
 Steps per episode:
-  1. Home
-  2. Open gripper
-  3. Move above target ball
-  4. Cartesian descend to ball
-  5. Close gripper
-  6. Cartesian ascend (lift)
-  7. Move above marker
-  8. Cartesian descend to marker
-  9. Open gripper (release)
-  10. Cartesian ascend
+  1. Home + open gripper
+  2. Pre-approach (shoulder tilted up, wrist oriented toward ball)
+  3. Above ball
+  4. Descend to grasp
+  5. Close jaws (friction grasp — no DetachableJoint)
+  6. Lift
+  7. Transit above marker
+  8. Descend to place
+  9. Open jaws (release)
+  10. Retreat straight up off the ball
   11. Home
-
-NB: the actual gripper-to-ball grasp currently fails due to gripper-mesh
-geometry — see CLAUDE_CHANGES.md. The motion trajectory still executes as
-intended, which is what the demo collector records.
 """
 
 from __future__ import annotations
@@ -34,33 +31,51 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus
 from control_msgs.action import FollowJointTrajectory
-from geometry_msgs.msg import Pose, PoseStamped
-from moveit_msgs.msg import MoveItErrorCodes, PositionIKRequest, RobotState, RobotTrajectory
-from moveit_msgs.srv import GetCartesianPath, GetPositionIK
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Empty, String
+from std_msgs.msg import Bool, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 SRC = Path(__file__).resolve().parent
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kinematics_so101 import (  # noqa: E402
-    JOINT_NAMES_ARM, fk_pose, mat_to_quat, solve_ik,
-)
+from kinematics_so101 import JOINT_NAMES_ARM  # noqa: E402
 
 GRIPPER_OPEN = 1.2
 GRIPPER_CLOSED = -0.15
+# Keyframe-grasp closure tuned via sliders (2026-04-24): at this opening the
+# jaws actually pinch the 3 cm cube instead of over-closing past it.
+GRIPPER_GRASP = 0.12
 WORLD_NAME = 'balls_world'
+
+# Hand-tuned joint poses captured via scripts/joint_sliders.py. Order:
+# [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll].
+BLUE_KEYFRAMES = {
+    'above':        np.array([-0.52, -0.36,  0.20, 1.658, -0.48]),
+    'grasp':        np.array([-0.53, -0.35,  0.21, 1.658, -0.48]),
+    'lift':         np.array([-0.53, -1.31,  0.21, 1.658, -0.48]),
+    'above_marker': np.array([ 0.00,  0.02, -0.42, 1.658, -0.48]),
+    'place':        np.array([ 0.00,  0.21, -0.52, 1.658, -0.48]),
+}
+# Red ball lives at y=-0.08 (blue is y=+0.08). Mirror the approach by flipping
+# shoulder_pan + wrist_roll on the ball-side poses; marker poses stay the same
+# since the marker sits on the y=0 axis.
+RED_KEYFRAMES = {
+    'above':        np.array([ 0.52, -0.36,  0.20, 1.658,  0.56]),
+    'grasp':        np.array([ 0.53, -0.35,  0.21, 1.658,  0.56]),
+    'lift':         np.array([ 0.53, -1.31,  0.21, 1.658,  0.56]),
+    'above_marker': np.array([ 0.00,  0.02, -0.42, 1.658,  0.56]),
+    'place':        np.array([ 0.00,  0.21, -0.52, 1.658,  0.56]),
+}
 
 
 BALL_SDF_TEMPLATE = """<?xml version=\"1.0\" ?>
@@ -190,20 +205,23 @@ def reset_world(cfg, rng: np.random.Generator, randomize: bool = False) -> Tuple
     """
     gz_world_reset_joints()
     time.sleep(0.3)
-    blue_xy = (0.16, 0.08)
-    red_xy = (0.16, -0.08)
+    blue_xy = (0.22, 0.08)
+    red_xy = (0.22, -0.08)
     if randomize:
-        blue_xy = (0.16 + rng.uniform(-0.03, 0.03), 0.08 + rng.uniform(-0.03, 0.03))
-        red_xy = (0.16 + rng.uniform(-0.03, 0.03), -0.08 + rng.uniform(-0.03, 0.03))
+        blue_xy = (0.22 + rng.uniform(-0.03, 0.03), 0.08 + rng.uniform(-0.03, 0.03))
+        red_xy = (0.22 + rng.uniform(-0.03, 0.03), -0.08 + rng.uniform(-0.03, 0.03))
     # Pause, set_pose twice (velocity flush trick), unpause
     gz_world_pause(True)
     time.sleep(0.2)
     for _ in range(2):
-        gz_set_pose('blue_ball', [blue_xy[0], blue_xy[1], 0.11])
-        gz_set_pose('red_ball', [red_xy[0], red_xy[1], 0.11])
+        gz_set_pose('blue_ball', [blue_xy[0], blue_xy[1], 0.10])
+        gz_set_pose('red_ball', [red_xy[0], red_xy[1], 0.10])
         time.sleep(0.1)
     gz_world_pause(False)
-    time.sleep(0.5)
+    # Cubes dropped from z=0.10 onto a table at z=0.08 need ~1 s to fully
+    # settle; starting the approach too early means the ball is still
+    # rolling a few mm when the jaws close.
+    time.sleep(1.5)
     return blue_xy, red_xy
 
 
@@ -228,27 +246,7 @@ def gz_model_pose(name: str) -> Optional[Tuple[float, float, float]]:
 @dataclass
 class Cfg:
     target_ball: str = 'blue_ball'
-    marker_xy: Tuple[float, float] = (0.22, 0.0)
-    marker_z: float = 0.085
-    hover_dz: float = 0.15
-    grasp_tcp_dz: float = 0.0
-    lift_dz: float = 0.20
-    approach_sec: float = 3.0
-    cart_max_step: float = 0.01
-
-
-def pose_base(x: float, y: float, z: float, rot: np.ndarray) -> PoseStamped:
-    qx, qy, qz, qw = mat_to_quat(rot)
-    ps = PoseStamped()
-    ps.header.frame_id = 'base_link'
-    ps.pose.position.x = float(x)
-    ps.pose.position.y = float(y)
-    ps.pose.position.z = float(z)
-    ps.pose.orientation.x = float(qx)
-    ps.pose.orientation.y = float(qy)
-    ps.pose.orientation.z = float(qz)
-    ps.pose.orientation.w = float(qw)
-    return ps
+    marker_xy: Tuple[float, float] = (0.28, 0.0)
 
 
 class PickPlaceMoveItNode(Node):
@@ -259,26 +257,10 @@ class PickPlaceMoveItNode(Node):
             JointState, '/joint_states', self._on_joint_state,
             QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
         )
-        self.ik_client = self.create_client(GetPositionIK, '/compute_ik')
-        self.cart_client = self.create_client(GetCartesianPath, '/compute_cartesian_path')
         self.arm_action = ActionClient(self, FollowJointTrajectory, '/arm_controller/follow_joint_trajectory')
         self.grip_action = ActionClient(self, FollowJointTrajectory, '/gripper_controller/follow_joint_trajectory')
         self.record_pub = self.create_publisher(Bool, '/episode/record', 10)
         self.target_pub = self.create_publisher(String, '/episode/target', 10)
-        self.attach_pubs = {
-            'blue_ball': self.create_publisher(Empty, '/attach_blue', 1),
-            'red_ball':  self.create_publisher(Empty, '/attach_red', 1),
-        }
-        self.detach_pubs = {
-            'blue_ball': self.create_publisher(Empty, '/detach_blue', 1),
-            'red_ball':  self.create_publisher(Empty, '/detach_red', 1),
-        }
-
-    def attach(self, ball: str):
-        self.attach_pubs[ball].publish(Empty())
-
-    def detach(self, ball: str):
-        self.detach_pubs[ball].publish(Empty())
 
     def _on_joint_state(self, msg: JointState):
         self.joint_state = msg
@@ -301,15 +283,6 @@ class PickPlaceMoveItNode(Node):
         return (self.arm_action.wait_for_server(timeout_sec=timeout)
                 and self.grip_action.wait_for_server(timeout_sec=timeout))
 
-    def wait_services(self, timeout: float = 15.0) -> bool:
-        if not self.ik_client.wait_for_service(timeout_sec=timeout):
-            self.get_logger().error('/compute_ik not available')
-            return False
-        if not self.cart_client.wait_for_service(timeout_sec=timeout):
-            self.get_logger().error('/compute_cartesian_path not available')
-            return False
-        return True
-
     def wait_for_joint_state(self, timeout: float = 10.0) -> bool:
         t0 = time.time()
         while time.time() - t0 < timeout:
@@ -317,62 +290,6 @@ class PickPlaceMoveItNode(Node):
             if self.joint_state is not None:
                 return True
         return False
-
-    def compute_ik(self, pose: PoseStamped, seed_q: np.ndarray) -> Optional[np.ndarray]:
-        req = GetPositionIK.Request()
-        req.ik_request.group_name = 'arm'
-        req.ik_request.pose_stamped = pose
-        req.ik_request.ik_link_name = 'tcp_jaw_link'
-        req.ik_request.timeout.sec = 2
-        req.ik_request.avoid_collisions = False
-        # seed
-        rs = RobotState()
-        rs.joint_state = JointState()
-        rs.joint_state.name = list(JOINT_NAMES_ARM)
-        rs.joint_state.position = [float(x) for x in seed_q]
-        req.ik_request.robot_state = rs
-        fut = self.ik_client.call_async(req)
-        self._spin_until(fut, timeout=5.0)
-        res = fut.result()
-        if res is None or res.error_code.val != MoveItErrorCodes.SUCCESS:
-            code = res.error_code.val if res else 'no response'
-            self.get_logger().warn(f'compute_ik failed: {code}')
-            return None
-        # Extract the arm joint values from the full solution
-        m = dict(zip(res.solution.joint_state.name, res.solution.joint_state.position))
-        try:
-            return np.array([m[n] for n in JOINT_NAMES_ARM])
-        except KeyError:
-            self.get_logger().warn(f'compute_ik missing joints: {list(m)}')
-            return None
-
-    def compute_cartesian(self, start_q: np.ndarray, waypoints: List[PoseStamped],
-                           max_step: float) -> Optional[RobotTrajectory]:
-        req = GetCartesianPath.Request()
-        req.group_name = 'arm'
-        req.link_name = 'tcp_jaw_link'
-        req.max_step = max_step
-        req.jump_threshold = 0.0
-        req.avoid_collisions = False
-        # start state
-        rs = RobotState()
-        rs.joint_state = JointState()
-        rs.joint_state.name = list(JOINT_NAMES_ARM)
-        rs.joint_state.position = [float(x) for x in start_q]
-        req.start_state = rs
-        req.waypoints = [ps.pose for ps in waypoints]
-        req.header.frame_id = 'base_link'
-        fut = self.cart_client.call_async(req)
-        self._spin_until(fut, timeout=10.0)
-        res = fut.result()
-        if res is None:
-            self.get_logger().warn('compute_cartesian: no response')
-            return None
-        if res.fraction < 0.95:
-            self.get_logger().warn(f'compute_cartesian: only {res.fraction:.2f} of path planned')
-        if res.fraction <= 0.0:
-            return None
-        return res.solution
 
     def exec_arm_traj(self, traj: JointTrajectory, timeout: float = 30.0) -> bool:
         goal = FollowJointTrajectory.Goal()
@@ -422,135 +339,106 @@ class PickPlaceMoveItNode(Node):
         self._spin_until(rfut, timeout=5.0)
         return rfut.result() is not None and rfut.result().status == GoalStatus.STATUS_SUCCEEDED
 
-    def cartesian_move(self, from_pose: PoseStamped, to_pose: PoseStamped,
-                        cfg: Cfg) -> bool:
-        cur_q = self.current_arm_q()
-        if cur_q is None:
-            return False
-        traj_msg = self.compute_cartesian(cur_q, [from_pose, to_pose], cfg.cart_max_step)
-        if traj_msg is None or len(traj_msg.joint_trajectory.points) == 0:
-            # Fallback: direct joint-goal via local IK
-            self.get_logger().info('cartesian plan empty; falling back to joint-goal')
-            target_pos = np.array([to_pose.pose.position.x, to_pose.pose.position.y,
-                                    to_pose.pose.position.z])
-            q, _, pe, _ = solve_ik(
-                target_pos, np.eye(3), q_seed=cur_q, orientation_weight=0.0,
-            )
-            if pe > 0.02:
-                self.get_logger().warn(f'fallback IK pos_err={pe:.4f}')
-                return False
-            return self.exec_joint_goal(q, 3.0)
-        return self.exec_arm_traj(traj_msg.joint_trajectory,
-                                   timeout=max(10.0, 2.0 * len(traj_msg.joint_trajectory.points) * 0.05))
 
+def run_episode_keyframe(node: PickPlaceMoveItNode, cfg: Cfg,
+                          kf: dict) -> bool:
+    """Keyframe-mode episode: joint-goal sequence captured from sliders.
 
-def run_episode(node: PickPlaceMoveItNode, cfg: Cfg) -> bool:
+    No IK, no /compute_cartesian_path, no DetachableJoint. The cube is held
+    by friction between the jaws — `GRIPPER_GRASP` is tuned to close on a
+    3 cm cube without over-closing past it.
+    """
     log = node.get_logger()
-    cur_q = node.current_arm_q()
-    if cur_q is None:
-        log.error('no joint state')
-        return False
-    # tell recorder the target color
-    t_msg = String()
-    t_msg.data = cfg.target_ball
+    # Tell recorder which color this episode is about, then flip record on.
+    t_msg = String(); t_msg.data = cfg.target_ball
     node.target_pub.publish(t_msg)
 
-    home_rot = fk_pose(np.zeros(5))[1]
-    ball_pos = gz_model_pose(cfg.target_ball)
-    if ball_pos is None:
-        log.error(f'no {cfg.target_ball} pose')
-        return False
-    bx, by, bz = ball_pos
-    mx, my = cfg.marker_xy
-
-    # (a) home + open gripper (PRE-recording: state setup)
-    if not node.exec_joint_goal(np.zeros(5), 2.5):
-        log.error('home failed')
-        return False
+    if not node.exec_joint_goal(np.zeros(5), 2.0):
+        log.error('home failed'); return False
     node.send_gripper(GRIPPER_OPEN)
     time.sleep(0.4)
-    # Start recording the episode
-    b = Bool(); b.data = True
-    node.record_pub.publish(b)
+
+    rec_on = Bool(); rec_on.data = True
+    node.record_pub.publish(rec_on)
     time.sleep(0.1)
 
-    # (b) joint goal to 'above ball' using local pos-only IK.
-    above_ball_pos = np.array([bx, by, bz + cfg.hover_dz])
-    q_above, _, pe, _ = solve_ik(
-        above_ball_pos, np.eye(3), q_seed=np.zeros(5),
-        orientation_weight=0.0,
-    )
-    if pe > 0.02:
-        log.warn(f'above_ball local IK pos_err={pe:.4f} m')
-    if not node.exec_joint_goal(q_above, 3.0):
-        return False
-    above_ball = pose_base(bx, by, bz + cfg.hover_dz, fk_pose(q_above)[1])
+    # Pre-approach: use the `lift` pose as an intermediate so the shoulder
+    # tilts up and the pan/wrist orient toward the ball BEFORE the hand is
+    # lowered. Going home->above directly sweeps the hand through the ball
+    # column and knocks the cube.
+    log.info('moving to pre-approach (lift pose, shoulder up first)')
+    if not node.exec_joint_goal(kf['lift'], 3.0):
+        log.error('pre-approach failed'); return False
     time.sleep(0.3)
 
-    # (c) Cartesian descent
-    at_ball = pose_base(bx, by, bz + cfg.grasp_tcp_dz, home_rot)
-    if not node.cartesian_move(above_ball, at_ball, cfg):
-        log.warn('cart descent failed; skipping')
-        # Don't return False — we want to record the attempt
+    log.info('moving to above')
+    if not node.exec_joint_goal(kf['above'], 2.5):
+        log.error('above failed'); return False
     time.sleep(0.3)
 
-    # (d) Close gripper + attach (DetachableJoint sim-level grasp)
-    node.send_gripper(GRIPPER_CLOSED, dur=1.0)
-    time.sleep(0.3)
-    node.attach(cfg.target_ball)
-    time.sleep(0.2)
+    # Log actual ball XY right before the descent so we can diagnose the
+    # "grasped air" cases: if the ball drifted more than ~1 cm from its
+    # spawn pose, the keyframe `grasp` pose will miss.
+    pre = gz_model_pose(cfg.target_ball)
+    if pre is not None:
+        log.info(f'{cfg.target_ball} XY before grasp: ({pre[0]:.3f}, {pre[1]:.3f})')
 
-    # (e) Cartesian ascent
-    lift_ball = pose_base(bx, by, bz + cfg.lift_dz, home_rot)
-    node.cartesian_move(at_ball, lift_ball, cfg)
-    time.sleep(0.3)
+    log.info('moving to grasp (slow descent)')
+    if not node.exec_joint_goal(kf['grasp'], 3.5):
+        log.error('grasp pose failed'); return False
+    time.sleep(0.4)
 
-    # (f) above marker via local IK. Warm-start from the current arm state
-    # (post-lift) so the seed is closer to reality than the pre-grasp q_above.
-    above_marker_pos = np.array([mx, my, cfg.marker_z + cfg.hover_dz])
-    cur_q = node.current_arm_q()
-    seed = cur_q if cur_q is not None else q_above
-    q_above_m, _, pe_m, _ = solve_ik(
-        above_marker_pos, np.eye(3),
-        q_seed=seed, orientation_weight=0.0,
-    )
-    if pe_m <= 0.02:
-        node.exec_joint_goal(q_above_m, 3.0)
-    else:
-        log.warn(f'above_marker pe={pe_m}; skipped')
-    above_marker = pose_base(mx, my, cfg.marker_z + cfg.hover_dz, fk_pose(q_above_m)[1])
+    log.info(f'closing gripper to {GRIPPER_GRASP}')
+    node.send_gripper(GRIPPER_GRASP, dur=1.0)
+    time.sleep(0.5)
 
-    # (g) Cartesian descent to marker
-    at_marker = pose_base(mx, my, cfg.marker_z + 0.03, home_rot)
-    node.cartesian_move(above_marker, at_marker, cfg)
-
-    # (h) Release + detach (jaws open, DetachableJoint released)
-    node.send_gripper(GRIPPER_OPEN, dur=0.8)
-    time.sleep(0.3)
-    node.detach(cfg.target_ball)
+    log.info('moving to lift')
+    if not node.exec_joint_goal(kf['lift'], 2.0):
+        log.error('lift failed'); return False
     time.sleep(0.3)
 
-    # (i) Ascent + home
-    lift_m = pose_base(mx, my, cfg.marker_z + cfg.lift_dz, home_rot)
-    node.cartesian_move(at_marker, lift_m, cfg)
-    node.exec_joint_goal(np.zeros(5), 2.5)
-
-    # Stop recording BEFORE success check so recorder flushes
-    b = Bool(); b.data = False
-    node.record_pub.publish(b)
+    # Transit: route through the `lift` posture (arm high) rather than
+    # swinging down-through-space to above_marker. Same reasoning as
+    # pre-approach: keeps the hand out of the workspace while the shoulder
+    # swings to the marker side.
+    log.info('moving to above_marker')
+    if not node.exec_joint_goal(kf['above_marker'], 3.0):
+        log.error('above_marker failed'); return False
     time.sleep(0.3)
 
-    # Success criterion
+    log.info('moving to place')
+    if not node.exec_joint_goal(kf['place'], 2.5):
+        log.error('place failed'); return False
+    time.sleep(0.3)
+
+    log.info('releasing gripper')
+    node.send_gripper(GRIPPER_OPEN, dur=0.6)
+    time.sleep(0.5)
+
+    # Retreat: lift straight up off the ball before swinging home. Without
+    # this the wrist/jaws rake across the marker and knock the cube out of
+    # the 5 cm success radius as the shoulder rotates back through home.
+    log.info('retreating to above_marker')
+    if not node.exec_joint_goal(kf['above_marker'], 2.0):
+        log.error('retreat failed'); return False
+    time.sleep(0.3)
+
+    rec_off = Bool(); rec_off.data = False
+    node.record_pub.publish(rec_off)
+
+    node.exec_joint_goal(np.zeros(5), 2.0)
+    time.sleep(0.4)
+
     final = gz_model_pose(cfg.target_ball)
     if final is None:
-        return False
+        log.error('no ball pose post-place'); return False
     dx = final[0] - cfg.marker_xy[0]
     dy = final[1] - cfg.marker_xy[1]
-    dist = (dx * dx + dy * dy) ** 0.5
-    success = dist <= 0.05
+    err = float(np.hypot(dx, dy))
+    ok = err < 0.05
     log.info(f'final {cfg.target_ball}=({final[0]:.3f},{final[1]:.3f},{final[2]:.3f}) '
-             f'dist_to_marker={dist:.3f} -> {"SUCCESS" if success else "FAIL"}')
-    return success
+             f'dist_to_marker={err:.3f} -> {"SUCCESS" if ok else "FAIL"}')
+    return ok
 
 
 def main(argv=None):
@@ -571,8 +459,6 @@ def main(argv=None):
         if not node.wait_for_joint_state(timeout=15.0):
             node.get_logger().error('no joint state')
             return 1
-        if not node.wait_services(timeout=15.0):
-            return 1
         if not node.wait_action_servers(timeout=15.0):
             return 1
         successes = 0
@@ -580,10 +466,14 @@ def main(argv=None):
             node.get_logger().info(f'=== episode {i + 1}/{args.trials} ===')
             blue_xy, red_xy = reset_world(None, rng, randomize=args.randomize)
             target = args.target if args.target else ('blue_ball' if i % 2 == 0 else 'red_ball')
-            ball_xy = blue_xy if target == 'blue_ball' else red_xy
-            cfg = Cfg(target_ball=target, marker_xy=(0.22, 0.0))
-            # Inject actual ball xy into marker config? No — we read ball pose from gz in run_episode.
-            if run_episode(node, cfg):
+            cfg = Cfg(target_ball=target, marker_xy=(0.28, 0.0))
+            if target == 'blue_ball':
+                ok = run_episode_keyframe(node, cfg, BLUE_KEYFRAMES)
+            elif target == 'red_ball':
+                ok = run_episode_keyframe(node, cfg, RED_KEYFRAMES)
+            else:
+                node.get_logger().error(f'no keyframes for {target}'); ok = False
+            if ok:
                 successes += 1
         node.get_logger().info(f'RESULT: {successes}/{args.trials}')
         return 0

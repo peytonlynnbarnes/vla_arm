@@ -80,7 +80,7 @@
 
     <model name="red_ball">
       <static>false</static>
-      <pose>0.16 -0.08 0.11 0 0 0</pose>
+      <pose>0.22 -0.08 0.10 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>0.05</mass>
@@ -93,14 +93,12 @@
             <iyz>0</iyz>
           </inertia>
         </inertial>
-        <!-- Box collision with flat faces so the jaws can pinch reliably.
-             Sphere collision caused the 3cm ball to squirt out between flat
-             fingers. 0.05 cube side fits just inside the 0.06 sphere diameter
-             so the visual sphere still appears to touch the table/jaw normally. -->
+        <!-- 5cm cube: flat faces pinch reliably between the jaws. Visual
+             matches the collision so what you see is what the gripper grips. -->
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.05 0.05 0.05</size>
+              <size>0.03 0.03 0.03</size>
             </box>
           </geometry>
           <surface>
@@ -114,9 +112,9 @@
         </collision>
         <visual name="visual">
           <geometry>
-            <sphere>
-              <radius>0.03</radius>
-            </sphere>
+            <box>
+              <size>0.03 0.03 0.03</size>
+            </box>
           </geometry>
           <material>
             <ambient>1 0 0 1</ambient>
@@ -128,7 +126,7 @@
 
     <model name="blue_ball">
       <static>false</static>
-      <pose>0.16 0.08 0.11 0 0 0</pose>
+      <pose>0.22 0.08 0.10 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>0.05</mass>
@@ -144,7 +142,7 @@
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.05 0.05 0.05</size>
+              <size>0.03 0.03 0.03</size>
             </box>
           </geometry>
           <surface>
@@ -158,9 +156,9 @@
         </collision>
         <visual name="visual">
           <geometry>
-            <sphere>
-              <radius>0.03</radius>
-            </sphere>
+            <box>
+              <size>0.03 0.03 0.03</size>
+            </box>
           </geometry>
           <material>
             <ambient>0 0 1 1</ambient>
@@ -212,7 +210,7 @@
          at the same XY; placement success is a 2-D test, not stacked. -->
     <model name="place_target">
       <static>true</static>
-      <pose>0.22 0.00 0.085 0 0 0</pose>
+      <pose>0.28 0.00 0.085 0 0 0</pose>
       <link name="link">
         <visual name="visual">
           <geometry>

@@ -18,18 +18,22 @@ def generate_launch_description():
 
     render_engine = LaunchConfiguration('render_engine')
     moveit_start_delay = LaunchConfiguration('moveit_start_delay')
+    headless = LaunchConfiguration('headless')
 
     declare_render_engine = DeclareLaunchArgument(
         'render_engine', default_value='ogre2')
     declare_moveit_delay = DeclareLaunchArgument(
         'moveit_start_delay', default_value='10.0',
         description='Seconds to wait after arm_gazebo before bringing up move_group.')
+    declare_headless = DeclareLaunchArgument(
+        'headless', default_value='true',
+        description='Forwarded to arm_gazebo: true=server-only, false=GUI window.')
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([arm_description_pkg, 'launch', 'arm_gazebo.launch.py'])
         ),
-        launch_arguments={'render_engine': render_engine}.items(),
+        launch_arguments={'render_engine': render_engine, 'headless': headless}.items(),
     )
 
     moveit = IncludeLaunchDescription(
@@ -43,6 +47,7 @@ def generate_launch_description():
     return LaunchDescription([
         declare_render_engine,
         declare_moveit_delay,
+        declare_headless,
         gazebo,
         delayed_moveit,
     ])

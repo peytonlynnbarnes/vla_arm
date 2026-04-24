@@ -2,6 +2,160 @@
 
 Human-readable log of changes Claude has applied. Newest entries at the top.
 
+## 2026-04-24 — strip IK path entirely; keyframe-only expert
+
+- `pick_and_place_moveit.py`: deleted `run_episode` (the MoveIt IK /
+  compute_cartesian_path + local-IK-fallback path), the `--ik-mode` flag,
+  `PickPlaceMoveItNode.compute_ik` / `compute_cartesian` /
+  `cartesian_move` / `wait_services`, the `/compute_ik` +
+  `/compute_cartesian_path` service clients, `pose_base` helper,
+  `ARM_BASE_Z`, Cfg fields `marker_z`/`hover_dz`/`grasp_tcp_dz`/
+  `lift_dz`/`approach_sec`/`cart_max_step`, and unused imports
+  (`Pose`, `PoseStamped`, `GetCartesianPath`, `GetPositionIK`,
+  `PositionIKRequest`, `RobotState`, `RobotTrajectory`,
+  `MoveItErrorCodes`, and `down_rotation`/`fk_pose`/`mat_to_quat`/
+  `solve_ik` from `kinematics_so101`). File shrank ~200 lines. The node
+  no longer requires `move_group` to be running — just the two
+  joint-trajectory controllers. Rewrote the module docstring.
+
+## 2026-04-24 — keyframe is the default; IK path behind --ik-mode
+
+- `pick_and_place_moveit.py` CLI: `--keyframe-mode` removed;
+  `--ik-mode` added (default off). Default invocation now runs the
+  keyframe path, which has ~100% success vs the IK path's ~50%.
+  `run_episode()` (IK + compute_cartesian_path + local-IK fallback) is
+  retained behind the flag for comparison/debugging.
+
+## 2026-04-24 — remove DetachableJoint attach/detach signals
+
+- Friction grasp now reliably holds the 3 cm cube between the jaws, so
+  the DetachableJoint sim-cheat is no longer needed. Removed
+  `PickPlaceMoveItNode.attach_pubs`/`detach_pubs`, `attach()`/`detach()`
+  methods, the `/attach_*`/`/detach_*` publisher setup, and the
+  attach/detach calls inside `run_episode()`. Unused `Empty` import
+  dropped.
+- The DetachableJoint plugins still live in the URDF — this just stops
+  the expert from pinging them.
+
+## 2026-04-24 — keyframe mode: red-ball keyframes (mirror of blue)
+
+- Added `RED_KEYFRAMES` in `pick_and_place_moveit.py`. Mirrors
+  `BLUE_KEYFRAMES` by flipping the sign of `shoulder_pan` on the
+  ball-side poses (`above`, `grasp`, `lift`). Marker-side poses
+  (`above_marker`, `place`) are unchanged because the place target sits
+  on the y=0 centerline.
+- Wired into `main()` dispatch: `target=='red_ball'` now uses
+  `RED_KEYFRAMES` in keyframe mode.
+
+## 2026-04-24 — keyframe mode: firmer pinch + settle + slower descent + drift log
+
+- `GRIPPER_GRASP` 0.19 -> 0.12: previous value closed too loosely on the
+  3 cm cube; ep1 of the 2-trial run ended with the ball back near pickup
+  (ball slipped during transit). Tighter close should bite harder without
+  over-closing past the cube.
+- `reset_world` settle `time.sleep(0.5)` -> `1.5` after unpause: cubes
+  dropped from z=0.10 onto a z=0.08 table need ~1 s to fully stop; the
+  approach was starting while the ball was still rolling a few mm.
+- `run_episode_keyframe`: slowed `above -> grasp` descent from 2.0 s to
+  3.5 s and inserted a `gz_model_pose` log of ball XY right before the
+  descent so we can see drift between trials.
+
+## 2026-04-24 — keyframe mode: add retreat step after release
+
+- `src/vla/vla/pick_and_place_moveit.py` `run_episode_keyframe`: inserted
+  `above_marker` as a retreat pose after gripper-open, before returning to
+  home. Previously the place -> release -> home sequence dragged the open
+  jaws across the marker and knocked the just-placed cube out of the
+  success radius. Lifting straight up first keeps the ball settled.
+
+## 2026-04-23 — balls moved further + shrunk, proximity gate kept, frame-fix REVERTED
+
+- `src/arm_description/worlds/ball_world.sdf`: balls moved (0.16, ±0.08)
+  -> (0.22, ±0.08) (6 cm further from the arm base for easier approach);
+  marker moved (0.22, 0) -> (0.28, 0) to preserve separation; cube
+  collision + visual 4 cm -> 3 cm.
+- `src/vla/vla/pick_and_place_moveit.py`: `reset_world` ball defaults
+  and `Cfg.marker_xy` default updated to match. **Reverted the frame
+  conversion** (`ARM_BASE_Z = 0.2` -> `0.0`): base_link is actually at
+  world z=0 (the URDF `world_to_base` joint has `xyz="0 0 -0.2"` and
+  `robot_state_publisher` publishes `world->base_link` z=-0.2 while the
+  model itself spawns at world z=0.2, so base_link ends up at world
+  z=0). My earlier "fix" was pushing IK targets to world z=-0.1
+  (underground), which is why the fallback local IK returned garbage
+  with TCP 23 cm above the ball. Kept the proximity gate and the
+  explicit `ball_world_to_base` subtraction (now a no-op) so the frame
+  relationship is documented in code.
+- `BYPASS_ITERATE.md`: new runbook for a bypass-session Claude to
+  iterate headless on the expert until it reliably grasps and places.
+
+Still unverified: after revert, the expert does reach the ball in all
+three proximity-gate checks. Next run pending.
+
+## 2026-04-23 — cubes shrunk 5 cm -> 4 cm
+
+- `src/arm_description/worlds/ball_world.sdf`: red_ball and blue_ball
+  cubes (visual + collision) resized 5 cm -> 4 cm. Starting pose z
+  dropped 0.11 -> 0.10 so the 4 cm cube rests cleanly on the 0.08 m
+  table top instead of dropping a cm first. Table and camera-marker
+  boxes untouched.
+- `src/vla/vla/grasp_spike_local.py`: `GraspConfig.ball_z` 0.11 -> 0.10
+  to match the new settled height.
+- `src/vla/vla/pick_and_place_moveit.py`: `reset_world` respawn z 0.11
+  -> 0.10 for both balls.
+
+## 2026-04-23 — auto-detach balls on launch
+
+`src/arm_description/launch/arm_gazebo.launch.py`: added an
+`ExecuteProcess` timer at t=8 s that publishes `/detach_blue` and
+`/detach_red` once. Reason: gz-sim DetachableJoint creates the fixed
+joint at plugin init, so without this the balls start attached to the
+gripper and follow the arm around when the operator uses joint sliders
+or any bare-sim tool. Grasp scripts already detach at trial reset, so
+they're unaffected; `/attach_{color}` re-attaches as before.
+
+## 2026-04-23 — ball visuals -> cubes (match existing cube collision)
+
+`src/arm_description/worlds/ball_world.sdf`: red_ball and blue_ball
+visuals changed from 3 cm sphere -> 5 cm cube, matching the collision
+boxes that were already in place. The visual/collision mismatch had
+been confusing operators into thinking the "balls" weren't graspable
+(the gripper was always pinching cubes; the sphere visual hid it).
+Stale comment on the red_ball collision updated to match. test_ball
+left unchanged (unused). Model names kept (`red_ball`, `blue_ball`)
+so DetachableJoint topics and all downstream code still work.
+
+## 2026-04-23 — joint slider GUI for interactive tuning
+
+- Added `scripts/joint_sliders.py`: a standalone Tk + rclpy GUI with
+  per-joint sliders for the 5 arm joints + gripper. Publishes short
+  JointTrajectory messages (current -> target over 0.4 s) on every
+  slider change, reads initial positions from /joint_states, and has
+  a HOME (zeros) button. Written because `rqt_joint_trajectory_controller`
+  kept failing with "Waiting for the robot_description!" on Jazzy, and
+  passing the full URDF via `--ros-args -p` overflowed rclcpp's CLI
+  buffer. No apt install needed; tkinter is stdlib.
+
+## 2026-04-23 — grasp_spike tuning knobs + WSL2 GUI launch fix
+
+- `src/arm_description/launch/arm_gazebo.launch.py`: the `headless` arg
+  was declared but not wired into `gz_args`; it always passed
+  `-s --headless-rendering`. Now `headless:=false` drops those flags so
+  the Gazebo GUI window appears. Needed for running the demo on a WSL2
+  host where the user wants to see the sim.
+- `src/vla/vla/grasp_spike_local.py`:
+  - Lowered `GraspConfig.success_z` from 0.18 → 0.13 (ball counted as
+    grasped once it's ~2 cm above resting z; easier threshold).
+  - `GRIPPER_OPEN` bumped 0.5 → 1.2 rad (~29° → 69°) to match the
+    scripted expert. Wider jaw opening reduces the chance of the ball
+    getting bumped on descent.
+  - Added `GraspConfig.shoulder_lift_bias_rad` (default 0) and a new
+    CLI flag `--shoulder-lift-bias-deg`. The bias is added to the
+    IK-solved shoulder_lift angle at the hover-above-ball pose, and
+    also triggers an explicit pre-approach step (before the main
+    approach) that tilts only shoulder_lift to the biased angle while
+    other joints stay at home. Lets the operator pre-tension motor 2
+    visibly before the rest of the arm swings into hover.
+
 ## 2026-04-23 — SmolVLA fine-tune kicked off + OpenVLA pipeline fully removed
 
 Two-part change covering the live training run and the OpenVLA cleanup.

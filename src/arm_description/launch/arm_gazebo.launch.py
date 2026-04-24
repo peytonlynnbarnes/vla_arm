@@ -10,7 +10,7 @@ from launch.actions import (
     TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, EnvironmentVariable
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, EnvironmentVariable, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -121,8 +121,13 @@ def generate_launch_description():
         ),
         launch_arguments={
             # -s: server only (no GUI); -r: run immediately; --headless-rendering forces offscreen.
+            # When headless:=false we drop -s/--headless-rendering so the GUI window appears.
             'gz_args': [
-                '-r -s --headless-rendering --render-engine ',
+                PythonExpression([
+                    "'-r -s --headless-rendering --render-engine ' if '",
+                    headless,
+                    "'.lower() in ('true','1','yes') else '-r --render-engine '",
+                ]),
                 render_engine,
                 ' ',
                 world,
@@ -221,6 +226,23 @@ def generate_launch_description():
         ]
     )
 
+    # DetachableJoint plugin creates the fixed joint at init, so balls start
+    # attached to the gripper. Publish detach once after the bridges are up
+    # so the sim begins with free balls. Grasp scripts still /attach_* later.
+    detach_on_start = TimerAction(
+        period=8.0,
+        actions=[
+            ExecuteProcess(
+                cmd=['ros2', 'topic', 'pub', '--once', '/detach_blue',
+                     'std_msgs/msg/Empty', '{}'],
+                output='screen'),
+            ExecuteProcess(
+                cmd=['ros2', 'topic', 'pub', '--once', '/detach_red',
+                     'std_msgs/msg/Empty', '{}'],
+                output='screen'),
+        ]
+    )
+
     return LaunchDescription([
         declare_use_sim_time,
         declare_world,
@@ -240,4 +262,5 @@ def generate_launch_description():
         detach_bridge,
         delayed_spawn,
         delayed_controllers,
+        detach_on_start,
     ])

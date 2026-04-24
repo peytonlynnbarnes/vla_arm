@@ -57,7 +57,7 @@ from kinematics_so101 import (  # noqa: E402
 
 
 GRIPPER_JOINT = 'gripper'
-GRIPPER_OPEN = 0.5
+GRIPPER_OPEN = 1.2
 GRIPPER_CLOSED = -0.174
 WORLD_NAME = 'balls_world'
 
@@ -66,7 +66,7 @@ WORLD_NAME = 'balls_world'
 class GraspConfig:
     ball: str = 'blue_ball'
     ball_xy: Tuple[float, float] = (0.16, 0.08)
-    ball_z: float = 0.11
+    ball_z: float = 0.10
     # TCP target relative to ball_z. At the bent-arm descent pose, TCP sits below
     # gripper_link (where the jaws live); empirically ~5cm is a good offset so the
     # jaws straddle the ball when closing.
@@ -79,10 +79,13 @@ class GraspConfig:
     descent_sec: float = 3.0
     grip_close_sec: float = 1.2
     ascent_sec: float = 3.0
-    success_z: float = 0.18
+    success_z: float = 0.13
     # Pin wrist_roll so jaws always open in the same orientation.
     wrist_roll_lock: float = 1.5708
     wrist_roll_weight: float = 2.0
+    # Signed offset added to IK-solved shoulder_lift at the hover-above-ball pose.
+    # Positive or negative depending on URDF axis direction; tune with CLI flag.
+    shoulder_lift_bias_rad: float = 0.0
 
 
 def gz_world_reset_joints_only() -> bool:
@@ -410,6 +413,11 @@ def run_trial(node: GraspSpikeNode, cfg: GraspConfig, idx: int) -> bool:
     )
     if pe_h > 0.01:
         logger.warn(f'hover IK pos_err={pe_h:.4f} m (>1 cm); trial may fail')
+    if cfg.shoulder_lift_bias_rad != 0.0:
+        q_hover = q_hover.copy()
+        q_hover[1] += cfg.shoulder_lift_bias_rad
+        logger.info(f'applied shoulder_lift bias {np.degrees(cfg.shoulder_lift_bias_rad):+.1f} deg '
+                    f'-> q_hover[shoulder_lift]={q_hover[1]:+.3f} rad')
 
     descent_wps = compute_cartesian_path(
         hover_pos, grasp_pos, q_hover, cfg.descent_steps,
@@ -424,6 +432,18 @@ def run_trial(node: GraspSpikeNode, cfg: GraspConfig, idx: int) -> bool:
     logger.info(f'descent max pos_err={max_desc_err:.4f} m; ascent max pos_err={max_asc_err:.4f} m')
 
     _log_ball(cfg, logger, 'pre-approach')
+
+    # 0) Pre-approach: tilt shoulder_lift back by the bias before the rest of
+    # the arm moves. Lets the user visibly pre-tension motor 2 before the
+    # approach rotates the other joints into the hover pose.
+    if cfg.shoulder_lift_bias_rad != 0.0:
+        q_pre = np.zeros(5)
+        q_pre[1] = cfg.shoulder_lift_bias_rad
+        logger.info(f'pre-approach shoulder_lift tilt to {np.degrees(q_pre[1]):+.1f} deg')
+        if not node.send_arm([q_pre], [1.5]):
+            logger.error('pre-approach failed')
+            return False
+        time.sleep(0.2)
 
     # 1) Approach: joint-plan to q_hover
     if not node.send_arm([q_hover], [cfg.approach_sec]):
@@ -489,6 +509,9 @@ def main(argv=None):
     parser.add_argument('--hover-dz', type=float, default=0.15)
     parser.add_argument('--lift-dz', type=float, default=0.20)
     parser.add_argument('--descent-steps', type=int, default=20)
+    parser.add_argument('--shoulder-lift-bias-deg', type=float, default=0.0,
+                        help='Degrees added to IK-solved shoulder_lift at the hover-above-ball '
+                             'pose. Try +/- 20-30 for a more-back tilt; sign depends on URDF axis.')
     args = parser.parse_args(argv)
 
     rclpy.init()
@@ -509,6 +532,7 @@ def main(argv=None):
             lift_dz=args.lift_dz,
             descent_steps=args.descent_steps,
             ascent_steps=args.descent_steps,
+            shoulder_lift_bias_rad=np.radians(args.shoulder_lift_bias_deg),
         )
         successes = 0
         for i in range(args.trials):
