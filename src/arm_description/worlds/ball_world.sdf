@@ -168,43 +168,6 @@
       </link>
     </model>
 
-
-        <model name="test_ball">
-      <static>true</static>
-      <pose>0.40 0.00 0.65 0 0 0</pose>
-      <link name="link">
-        <inertial>
-          <mass>0.05</mass>
-          <inertia>
-            <ixx>0.00002</ixx>
-            <iyy>0.00002</iyy>
-            <izz>0.00002</izz>
-            <ixy>0</ixy>
-            <ixz>0</ixz>
-            <iyz>0</iyz>
-          </inertia>
-        </inertial>
-        <collision name="collision">
-          <geometry>
-            <sphere>
-              <radius>0.03</radius>
-            </sphere>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <sphere>
-              <radius>0.03</radius>
-            </sphere>
-          </geometry>
-          <material>
-            <ambient>1 0 0 1</ambient>
-            <diffuse>1 0 0 1</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-
     <!-- Fixed place-target: green disc on the table. Visual-only (no
          collision) so a ball released above it simply lands on the table
          at the same XY; placement success is a 2-D test, not stacked. -->

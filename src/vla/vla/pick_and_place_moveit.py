@@ -44,11 +44,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-SRC = Path(__file__).resolve().parent
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-from kinematics_so101 import JOINT_NAMES_ARM  # noqa: E402
+JOINT_NAMES_ARM = ['shoulder_pan', 'shoulder_lift', 'elbow_flex',
+                   'wrist_flex', 'wrist_roll']
 
 GRIPPER_OPEN = 1.2
 GRIPPER_CLOSED = -0.15
@@ -208,8 +205,8 @@ def reset_world(cfg, rng: np.random.Generator, randomize: bool = False) -> Tuple
     blue_xy = (0.22, 0.08)
     red_xy = (0.22, -0.08)
     if randomize:
-        blue_xy = (0.22 + rng.uniform(-0.03, 0.03), 0.08 + rng.uniform(-0.03, 0.03))
-        red_xy = (0.22 + rng.uniform(-0.03, 0.03), -0.08 + rng.uniform(-0.03, 0.03))
+        blue_xy = (0.22 + rng.uniform(-0.01, 0.01), 0.08 + rng.uniform(-0.01, 0.01))
+        red_xy = (0.22 + rng.uniform(-0.01, 0.01), -0.08 + rng.uniform(-0.01, 0.01))
     # Pause, set_pose twice (velocity flush trick), unpause
     gz_world_pause(True)
     time.sleep(0.2)
@@ -371,20 +368,50 @@ def run_episode_keyframe(node: PickPlaceMoveItNode, cfg: Cfg,
         log.error('pre-approach failed'); return False
     time.sleep(0.3)
 
-    log.info('moving to above')
-    if not node.exec_joint_goal(kf['above'], 2.5):
-        log.error('above failed'); return False
-    time.sleep(0.3)
-
-    # Log actual ball XY right before the descent so we can diagnose the
-    # "grasped air" cases: if the ball drifted more than ~1 cm from its
-    # spawn pose, the keyframe `grasp` pose will miss.
+    # Pan correction: the canonical keyframes were tuned for ball_y=±0.08.
+    # With --randomize the ball can drift by up to 3 cm laterally; a fixed
+    # pan closes the jaws on empty space. Linear correction: rotate the base
+    # proportionally to the measured ball Y (ratio canonical_pan/canonical_y
+    # ≈ -6.6 rad/m for both colors by symmetry).
+    canonical_x = 0.22
+    canonical_y = 0.08 if cfg.target_ball == 'blue_ball' else -0.08
+    canonical_pan = float(kf['grasp'][0])
+    canonical_lift = float(kf['grasp'][1])
+    pan_scale = canonical_pan / canonical_y
+    # X correction: push shoulder_lift forward (less negative) proportional
+    # to Δx. Geometric estimate from upper-arm length ~0.15 m: ΔTCP_x ≈
+    # 0.15·Δshoulder_lift → scale ≈ 6.5 rad/m. Use 6.0 as a conservative start.
+    lift_scale = 6.0
+    above_q = kf['above'].copy()
+    grasp_q = kf['grasp'].copy()
+    # Clamp pan correction to ±0.12 rad from canonical: linear scaling
+    # overshoots at |y| ≥ 0.10 (arm geometry curves), so large corrections
+    # swing the jaws past the ball instead of onto it.
+    pan_clamp = 0.12
     pre = gz_model_pose(cfg.target_ball)
     if pre is not None:
         log.info(f'{cfg.target_ball} XY before grasp: ({pre[0]:.3f}, {pre[1]:.3f})')
+        raw_pan = float(pre[1]) * pan_scale
+        d_pan = max(-pan_clamp, min(pan_clamp, raw_pan - canonical_pan))
+        corrected_pan = canonical_pan + d_pan
+        dx = float(pre[0]) - canonical_x
+        corrected_lift = canonical_lift + dx * lift_scale
+        log.info(f'pan correction: {canonical_pan:.3f} -> {corrected_pan:.3f} '
+                 f'(ball_y={pre[1]:.3f}, raw={raw_pan:.3f}, clamped±{pan_clamp})')
+        log.info(f'lift correction: {canonical_lift:.3f} -> {corrected_lift:.3f} '
+                 f'(Δx={dx:+.3f})')
+        above_q[0] = corrected_pan
+        above_q[1] = canonical_lift + dx * lift_scale * 0.5  # softer on approach
+        grasp_q[0] = corrected_pan
+        grasp_q[1] = corrected_lift
+
+    log.info('moving to above')
+    if not node.exec_joint_goal(above_q, 2.5):
+        log.error('above failed'); return False
+    time.sleep(0.3)
 
     log.info('moving to grasp (slow descent)')
-    if not node.exec_joint_goal(kf['grasp'], 3.5):
+    if not node.exec_joint_goal(grasp_q, 3.5):
         log.error('grasp pose failed'); return False
     time.sleep(0.4)
 

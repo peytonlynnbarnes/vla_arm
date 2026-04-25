@@ -13,9 +13,9 @@ ament_python_install_package(${PROJECT_NAME})
 
 # Install executable Python node scripts
 install(PROGRAMS
-  vla/grasp_spike_local.py
   vla/pick_and_place_moveit.py
   vla/demo_recorder.py
+  vla/smolvla_inference_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

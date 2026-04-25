@@ -1,160 +1,252 @@
-# Next steps — SmolVLA fine-tune and deploy
+# Next steps — diagnose & fix the SmolVLA closed-loop failure
 
-You're picking up this project with the SmolVLA fine-tune **actively running on UCF's nobel server**. This doc is self-contained — read it top to bottom before doing anything.
+You are picking this up after a complete first-pass closed-loop eval on the
+re-fine-tuned SmolVLA checkpoint. The fine-tune ran clean on the new
+2026-04-25 dataset (103 blue / 97 red, friction grasps), but the policy
+**fails to grasp** in sim. Your job is to diagnose and fix that, not
+to re-collect data or retrain from scratch yet — try the cheap knobs first.
 
-## Where we are right now (2026-04-23)
+## Where we are right now (2026-04-25)
 
-**A 3k-step smoke-test fine-tune is running in a tmux session on nobel.** Full context:
+- **Checkpoint pulled locally** at `/home/peyton/vla_arm/checkpoints/smolvla_so101/`
+  (`config.json`, `model.safetensors`, `train_config.json`).
+- **Inference node written and built**: `src/vla/vla/smolvla_inference_node.py`,
+  registered in `src/vla/CMakeLists.txt`, installed at
+  `install/vla/lib/vla/smolvla_inference_node.py`.
+- **lerobot 0.3.3 installed** in `.venv` along with `torch 2.7.1+cu126`,
+  `transformers 4.51.3`, etc.
+- **numpy pinned to 1.26.4** in `.venv` — pip tried to upgrade to 2.4.4
+  during the lerobot install, which would have broken every ROS Jazzy
+  Python binding (`rclpy`, `cv_bridge`, etc.). Re-pinning fixed it. **Do
+  not let any subsequent pip install bump numpy past 2.0.**
+- **Closed-loop eval was attempted once on blue task.** Result: **FAIL.**
+  See "What happened in the first eval" below.
 
-- Host: `pe606840@nobel.ece.ucf.edu` (SSH over UCF VPN; see `cmds.txt` for tunnel + `openconnect-sso` command).
-- Working dir: `~/vla_smolvla/` on nobel. Contains the dataset (`data/demos_lerobot_final/`), a venv (`.venv/`), and the training wrapper (`train_relaxed.py`).
-- tmux session name: `smolvla`. Reattach with `tmux a -t smolvla`.
-- GPU: `CUDA_VISIBLE_DEVICES=0` — nobel has multiple cards, we pin to one. `nvidia-smi` on nobel to pick a free card if the run needs to be redone.
-- Config: LoRA-style partial fine-tune (vision encoder frozen + train_expert_only=True are SmolVLA defaults), 100M trainable params out of 450M, batch 64, lr 1e-4, ~0.35s/step → ~17 min for the smoke test.
-- Checkpoints land in `~/vla_smolvla/outputs/train/smolvla_so101_smoke/checkpoints/{001000,002000,003000}/pretrained_model/`.
+## What happened in the first eval
 
-**Do not assume training is still running when you pick this up.** Reattach and check. If finished, look at `loss` trajectory in the output — should be trending down from ~0.1 toward ~0.05. If crashed, the last error is probably one of the ones already patched in `train_relaxed.py` — look there first.
-
-## The canonical training command
-
-Smoke test (3k steps, ~17 min):
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python train_relaxed.py \
-    --policy.path=lerobot/smolvla_base \
-    --dataset.root=/home/pe606840/vla_smolvla/data/demos_lerobot_final \
-    --dataset.repo_id=local/so101_pickplace_sim \
-    --dataset.use_imagenet_stats=false \
-    --batch_size=64 \
-    --steps=3000 \
-    --eval_freq=-1 \
-    --save_freq=1000 \
-    --output_dir=outputs/train/smolvla_so101_smoke \
-    --policy.push_to_hub=false \
-    --wandb.enable=false
-```
-
-Full run (30k steps, ~3 h): same command with `--steps=30000 --save_freq=5000 --output_dir=outputs/train/smolvla_so101`.
-
-## Why we need `train_relaxed.py` (do NOT run `python -m lerobot.scripts.train` directly)
-
-Our dataset has four incompatibilities with vanilla LeRobot 0.3.3 that the wrapper patches around. Don't remove the wrapper without fixing the underlying issues.
-
-1. **Parquet timestamp jitter** (~1% around 100 ms nominal). ROS recorder wasn't clocked precisely. LeRobot's `check_timestamps_sync` defaults to 1e-4s tolerance and raises on every frame. Wrapper replaces the check with a no-op.
-
-2. **Video decoder tolerance is separate**, stored as `self.tolerance_s` on the dataset instance, default 1e-4s again. Same jitter trips it. Wrapper bumps it to 0.1s after `__init__`.
-
-3. **Off-by-one between parquet rows and mp4 frames.** Our `scripts/convert_to_lerobot.py` sometimes produced (n+1)-row parquet / n-frame mp4. The loader errors on out-of-range frame indices. Wrapper clamps timestamps to the last available frame in `decode_video_frames_torchcodec`. **This is a real bug in the converter — fix before another dataset round.**
-
-4. **`meta/stats.json` is missing image keys.** `make_dataset` unconditionally tries `dataset.meta.stats["observation.images.third_person"][stats_type] = ...` and KeyErrors if the image key isn't there. The `--dataset.use_imagenet_stats=false` flag sidesteps this by not entering that code path. SmolVLA's SigLIP vision encoder is pretrained with its own normalization, so this is safe.
-
-If you see new errors of similar shape, extend `train_relaxed.py` (or paste them to a new Claude — it'll know what to patch).
-
-## Your immediate work
-
-### Step 1. Verify the smoke test completed cleanly
-
-```bash
-ssh pe606840@nobel.ece.ucf.edu
-tmux a -t smolvla
-# scroll up — look for `step:3000` log line
-# if present: loss should be 0.02-0.05, training exited cleanly
-# checkpoint should exist at outputs/train/smolvla_so101_smoke/checkpoints/003000/pretrained_model/
-```
-
-If the smoke run crashed, debug. If it's still running, just wait.
-
-### Step 2. Kick off the full 30k-step run
-
-Same tmux session (or a new one `tmux new -s smolvla_full`). ~3 hours on A100 at batch 64:
-
-```bash
-cd ~/vla_smolvla && source .venv/bin/activate
-CUDA_VISIBLE_DEVICES=0 python train_relaxed.py \
-    --policy.path=lerobot/smolvla_base \
-    --dataset.root=/home/pe606840/vla_smolvla/data/demos_lerobot_final \
-    --dataset.repo_id=local/so101_pickplace_sim \
-    --dataset.use_imagenet_stats=false \
-    --batch_size=64 \
-    --steps=30000 \
-    --eval_freq=-1 \
-    --save_freq=5000 \
-    --output_dir=outputs/train/smolvla_so101 \
-    --policy.push_to_hub=false \
-    --wandb.enable=false
-```
-
-Detach from tmux (`Ctrl+b d`), reconnect periodically. Done when loss plateaus (~0.01-0.02 typical for SmolVLA on in-distribution data).
-
-### Step 3. Pull the checkpoint back
-
-From local:
-
-```bash
-rsync -aP pe606840@nobel.ece.ucf.edu:~/vla_smolvla/outputs/train/smolvla_so101/checkpoints/030000/pretrained_model/ \
-    /home/peyton/vla_arm/checkpoints/smolvla_so101/
-```
-
-### Step 4. Write the inference ROS node
-
-Doesn't exist yet. Target: `src/vla/vla/smolvla_inference_node.py`. Must:
-
-1. Subscribe to `/third_person/image_raw` (sensor_msgs/Image, 224×224 RGB) and `/joint_states` (sensor_msgs/JointState, needs re-ordering to `[shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]`).
-2. Accept a task string parameter (`"pick the blue ball and place it on the green marker"` etc.).
-3. Load the policy once at startup: `SmolVLAPolicy.from_pretrained("/path/to/checkpoints/.../pretrained_model")`. Import is from `lerobot.policies.smolvla.modeling_smolvla` in 0.3.3 (flat layout — no `lerobot.common.*`).
-4. On each image callback (or timer at 10 Hz to match training rate), build a batch dict matching the training features, call `policy.select_action(batch)`, slice the 6-D output into 5-D arm + 1-D gripper trajectories.
-5. Publish to `/arm_controller/joint_trajectory` (trajectory_msgs/JointTrajectory, joint names `[shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll]`) and `/gripper_controller/joint_trajectory` (joint `[gripper]`). See how `src/vla/vla/pick_and_place_moveit.py` builds these messages — copy that shape.
-6. Register in `src/vla/CMakeLists.txt` under `install(PROGRAMS ...)` or `colcon build` won't install it.
-
-Install LeRobot locally too: `pip install "lerobot[smolvla]==0.3.3"` into the repo's `.venv/`. Make sure the ROS node uses that venv, not system python.
-
-### Step 5. Closed-loop Gazebo eval
-
-Follow the mandatory clean-slate rule (see CLAUDE.md):
+Run was:
 
 ```bash
 bash scripts/nuke_sim.sh
-ros2 launch arm_description arm_gazebo.launch.py   # no MoveIt needed for inference
-# separate terminal:
-ros2 run vla smolvla_inference_node.py --ros-args \
+ros2 launch arm_description arm_gazebo.launch.py headless:=true   # bg
+.venv/bin/python install/vla/lib/vla/smolvla_inference_node.py --ros-args \
     -p checkpoint_path:=/home/peyton/vla_arm/checkpoints/smolvla_so101 \
-    -p task:="pick the blue ball and place it on the green marker"
+    -p task:='pick the blue ball and place it on the green marker' \
+    -p control_rate_hz:=10.0
 ```
 
-Success criterion (same as demo collection): ball XY within 5 cm of marker at (0.22, 0). Run 20+ trials per color, report success rate.
+Observations:
 
-## Known gotchas discovered during this run
+- **RTF** (`gz topic -e -t /stats`): 0.98–1.07× — sim is healthy on the
+  RTX 2060.
+- **Inference startup**: ~62 s on first run (HuggingFace downloads
+  `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` + SigLIP weights). Cached
+  after that.
+- **Inference loop runs cleanly** at 10 Hz on cuda, no exceptions.
+- **The arm moved**, ending at joint state ≈ (-0.16, -0.02, -0.22, 1.65,
+  -0.81), which is closest to `BLUE_KEYFRAMES['above_marker']` =
+  (0, 0.02, -0.42, 1.658, -0.48) — i.e., the *post-place transit* pose,
+  not the *grasp* pose.
+- **Gripper stayed at 1.19 rad (open)** the entire run. Never closed.
+- **Latest commanded action ≈ current state** — the policy converged to a
+  near-zero-delta steady output, just holding the half-pose.
+- **Blue cube final position**: (0.219, 0.080, 0.095) — barely moved
+  from initial (0.220, 0.080). Distance to marker (0.28, 0) = **0.101 m**
+  vs. 0.05 m success threshold. Cube was never touched.
 
-- **LeRobot 0.3.3 is the version to use.** 0.4.x restructured the dataset format to v3.0 and expects v3.0 datasets. Our dataset is v2.0. Only `v30/convert_dataset_v21_to_v30.py` ships — no v2.0→v2.1 converter in 0.3.3+. Sticking with 0.3.3 avoids the whole migration.
-- **Package layout in 0.3.3 is flat**: `lerobot.datasets.*`, `lerobot.policies.*`, `lerobot.scripts.*`. The older docs referencing `lerobot.common.datasets.*` are wrong for this version.
-- **Entry point is `python -m lerobot.scripts.train`**, not `lerobot-train` (that's a 0.4.x console script).
-- **`--policy.path=lerobot/smolvla_base`** is how you load the pretrained checkpoint; `--policy.pretrained_path` is 0.4.x syntax.
-- **`--env.type=none`** is 0.4.x — 0.3.3 rejects it. Just omit; `--eval_freq=-1` alone disables sim eval.
-- **Multi-GPU nobel machines will auto-shard the model via accelerate.** Pin with `CUDA_VISIBLE_DEVICES=0` or you hit layer-norm cross-device errors.
-- **Converter off-by-one** between parquet rows and mp4 frames in some episodes. Not catastrophic (wrapper clamps, max 1-frame loss per affected episode), but fix `scripts/convert_to_lerobot.py` before generating another dataset.
-- **Image stats absent from `meta/stats.json`.** Same converter gap. Unblocked by `--dataset.use_imagenet_stats=false` since SigLIP has its own normalization, but should be computed properly next time.
+## Leading hypothesis: training/inference time-horizon mismatch
+
+This is the most plausible cause of the "freeze in a half-pose with
+gripper open" failure mode, and it is the cheapest thing to test:
+
+`demo_recorder.py` records `action` as the **final position of the most
+recent `JointTrajectory` message**, not the next-step joint position.
+The keyframe expert sends ~2–3 s trajectories, so consecutive recorded
+frames at 10 Hz have nearly-identical action labels (the destination
+doesn't change while the controller interpolates).
+
+The policy therefore learned: *"emit a position that's a ~2–3 s waypoint
+ahead of the current joint state."* But the inference node publishes
+each commanded action as a `JointTrajectory` with `time_from_start =
+0.3 s`. The controller starts interpolating, then 100 ms later a new
+trajectory pre-empts it before any meaningful displacement occurs. The
+arm drifts in the policy's general direction at a rate way below the
+demo distribution → the joint state never enters the regime where the
+demo would have called for `grasp` → policy never closes the gripper.
+
+Confirming evidence: the arm did drift a substantial way (toward an
+intermediate pose), but the displacement-per-tick was much smaller than
+demo trajectories. With `n_action_steps=50` and `chunk_size=50` (5 s of
+buffered actions per inference call), the policy commits to a 5-second
+plan up front; if the plan doesn't actually execute (because each step
+is throttled to 0.3 s of motion), the second chunk replans from a
+now-OOD state.
+
+## Immediate work (try in this order, escalate only if cheap fixes don't move the needle)
+
+### Step A. Bump `command_horizon_sec` (no retrain, no checkpoint edit)
+
+`smolvla_inference_node.py` already exposes `command_horizon_sec` as a
+ROS parameter. Default 0.3 s; bump to 2.5 s to roughly match what the
+expert sent. Each inference tick still arrives every 100 ms and
+pre-empts, but each pre-empted trajectory now has time to actually move
+the arm before the next one arrives.
+
+```bash
+bash scripts/nuke_sim.sh
+ros2 launch arm_description arm_gazebo.launch.py headless:=true &
+.venv/bin/python install/vla/lib/vla/smolvla_inference_node.py --ros-args \
+    -p task:='pick the blue ball and place it on the green marker' \
+    -p command_horizon_sec:=2.5
+```
+
+Watch for: the arm actually descending toward the cube, gripper closing,
+cube moving. If you see *any* of those, this hypothesis is confirmed and
+proceed to Step B.
+
+### Step B. Lower `n_action_steps` so the policy re-plans more often
+
+`n_action_steps=50` at 10 Hz = a 5 s open-loop horizon. The world drifts
+a lot in 5 s — the cube position post-grasp, the joint state mid-place,
+etc. Drop to 10 (1 s) or 20 (2 s) so the policy re-observes after each
+chunk. This lives in `config.json` (and `train_config.json`) inside the
+checkpoint. Edit just `config.json`:
+
+```python
+import json
+p = '/home/peyton/vla_arm/checkpoints/smolvla_so101/config.json'
+c = json.load(open(p))
+c['n_action_steps'] = 10  # was 50
+json.dump(c, open(p, 'w'), indent=4)
+```
+
+`chunk_size` (the model's predicted output dim) stays 50 — only how many
+of those 50 you actually execute before re-querying changes. Re-run the
+eval as in Step A.
+
+### Step C. If A+B don't fix it: characterize failure across trials
+
+Don't keep eyeballing one trial. Write a small loop that, per color:
+
+1. `nuke_sim.sh` → relaunch sim → spawn cubes at canonical XY (no
+   randomization yet)
+2. Set the `task` parameter to match the color
+3. Run inference for ~30 s
+4. Read `gz model -m {ball} -p`, compute `dist_to_marker`, log `SUCCESS
+   if dist < 0.05`
+5. Repeat 10× per color
+
+Report: success rate per color, where in the sequence the policy
+plateaus (joint state at end), and whether the gripper ever closes. The
+keyframe expert is ~89% on canonical — you want to know how far below
+that SmolVLA is, and whether failures are positional (jaws miss the
+cube) vs. perceptual (arm goes to wrong cube) vs. control (drops
+mid-transit).
+
+The inference node currently takes `task` as a startup-only ROS
+parameter. If you want the eval loop to flip colors without restarting
+the node, add either (a) a `/task` `String` subscriber, or (b) make
+`task` a re-settable parameter that recomputes on the next inference
+tick. Option (a) is symmetric with how `pick_and_place_moveit.py`
+publishes `/episode/target` for the recorder.
+
+### Step D. Only after A–C: decide whether to retrain
+
+If A+B unblock grasping, you are done with this round — write up
+results and move on. If A+B do *not* fix it, the issue is deeper and
+the next round is a retrain with one or more of:
+
+- **`image_transforms.enable: true`** (free win — already configured in
+  `train_config.json`, just flipped off). Brightness/contrast/hue/sat/
+  sharpness jitter to broaden lighting robustness.
+- **Wider `--randomize` envelope.** Currently capped at ±1 cm because
+  the linear keyframe correction in
+  `pick_and_place_moveit.run_episode_keyframe` overshoots beyond that.
+  Calibrate a quadratic correction term against arm geometry, or have
+  the expert reject seeds outside its capability and re-roll. ±3–5 cm
+  XY would give the policy a much broader cube-position distribution to
+  generalize from.
+- **More episodes.** 200 is on the low end; 500–1000 is more typical
+  for VLA fine-tuning.
+- **Visual distractors.** Add a third non-target cube of a different
+  color. Right now the policy can win the prompt-following objective by
+  just "go to whichever cube" — with two non-targets it has to actually
+  parse the prompt.
+- **Re-recorded actions as next-step joint positions** (instead of
+  trajectory-destination positions). This is the proper fix to the
+  hypothesis above — change `demo_recorder._on_timer` to record
+  `action[t] = state[t+1]`, requiring a one-frame look-ahead buffer or
+  a post-process step over each saved episode. Then retrain.
+- **Unfreeze the vision encoder** (`freeze_vision_encoder: false`) only
+  after the data-side levers are exhausted. Big capacity bump but needs
+  more data and more steps to avoid catastrophic forgetting; the sim
+  render is OOD for SigLIP's pretraining so this *should* help, but
+  it's the most expensive change to validate.
+
+## How to invoke things correctly
+
+The script's shebang is `#!/usr/bin/env python3` which resolves to
+`/usr/bin/python3` (numpy 1.26.4, no torch, no lerobot), **not**
+`.venv/bin/python3`. Always invoke the inference node with the venv
+python explicitly:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+.venv/bin/python install/vla/lib/vla/smolvla_inference_node.py --ros-args ...
+```
+
+`.venv` was created without `--system-site-packages` (`pyvenv.cfg` says
+`include-system-site-packages = false`), but ROS Python imports work
+from `.venv/bin/python` because sourcing `/opt/ros/jazzy/setup.bash`
+prepends ROS site-packages to `PYTHONPATH`. Source ROS first.
+
+For closed-loop eval, always use `arm_gazebo.launch.py` (no MoveIt
+needed; the inference node doesn't call `move_group`):
+
+```bash
+ros2 launch arm_description arm_gazebo.launch.py headless:=true
+```
+
+`bash scripts/nuke_sim.sh` is **mandatory** before every sim run.
+Verify after with `pgrep -af "gz sim|controller_manager|move_group"`
+— if anything other than your own pgrep shows up, `kill -9` it before
+relaunching. Ghost `gz sim` processes survive `pkill -f 'ros2 launch'`
+and silently hold state across "fresh" launches.
+
+## Known gotchas (still apply, do not regress these)
+
+- **lerobot 0.3.3 is the pinned version.** 0.4.x restructured the
+  dataset format to v3.0 and changed the SmolVLA batch interface
+  (`OBS_LANGUAGE_TOKENS` directly instead of `task` strings).
+- **numpy must stay < 2.0** in the same venv as ROS bindings.
+- **Package layout in 0.3.3 is flat**: `lerobot.policies.smolvla.modeling_smolvla`,
+  not `lerobot.common.policies.*`.
+- **Train via `train_relaxed.py` only** (on nobel) — do not invoke
+  `python -m lerobot.scripts.train` directly. The wrapper patches four
+  LeRobot/dataset incompatibilities; same patches still apply.
+- **Multi-GPU nobel auto-shards via accelerate.** Pin
+  `CUDA_VISIBLE_DEVICES=0` or you hit layer-norm cross-device errors.
+- **Don't load the old (2026-04-23) checkpoint by mistake.** It was
+  trained on bad data (DetachableJoint magic-attach, 143/57 split).
 
 ## SSH / VPN reminder
 
-From `cmds.txt`:
-
 ```bash
-# VPN — in a terminal separate from SSH
 openconnect-sso --server secure.vpn.ucf.edu -- '--script=vpn-slice nobel.ece.ucf.edu'
-
-# SSH
 ssh pe606840@nobel.ece.ucf.edu
+# active venv is ~/vla_smolvla/.venv, dataset at ~/vla_smolvla/data/demos_lerobot_final/
 ```
-
-## What NOT to do
-
-- **Don't run `python -m lerobot.scripts.train` directly.** Use `train_relaxed.py`.
-- **Don't upgrade LeRobot past 0.3.3** unless you're ready to migrate the dataset to v3.0 (non-trivial, restructures file layout).
-- **Don't try full fine-tune (`train_expert_only=False`, vision encoder unfrozen) as a first attempt.** LoRA-style default converges fast and uses way less memory.
-- **Don't skip the clean-slate rule during closed-loop eval.** Ghost controllers + DetachableJoint state leak across runs. `bash scripts/nuke_sim.sh` every time.
 
 ## Read next
 
-- `CLAUDE.md` — full project conventions, every gotcha, every key file.
-- `train_relaxed.py` on nobel (and mirrored in this repo at `/home/peyton/vla_arm/train_relaxed.py`) — the wrapper + inline comments explaining each patch.
-- `CLAUDE_CHANGES.md` — dated log, newest at top. The 2026-04-23 entry explains this training run.
+- `CLAUDE.md` — project conventions, world geometry, every gotcha.
+- `CLAUDE_CHANGES.md` — dated log, newest at top. The 2026-04-25
+  entries explain the inference node design, the eval run, and this
+  diagnosis.
+- `src/vla/vla/smolvla_inference_node.py` — current node implementation.
+  `command_horizon_sec` and `control_rate_hz` are the two main ROS
+  params for tuning without a retrain.
+- `src/vla/vla/demo_recorder.py` — `_on_arm_traj` / `_on_timer` is where
+  the "action = trajectory destination" recording happens. Relevant if
+  you escalate to Step D.

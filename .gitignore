@@ -9,3 +9,22 @@ __pycache__/
 
 # Claude runtime state
 .claude/scheduled_tasks.lock
+
+# Virtualenv
+.venv/
+
+# Training artifacts
+checkpoints/
+outputs/
+
+# Raw + intermediate demo data (canonical artifact is data/demos_lerobot_final/)
+data/demos_raw/
+data/demos_raw_*/
+data/demos_successful/
+data/demos_lerobot_final_*/
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/

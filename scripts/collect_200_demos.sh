@@ -13,8 +13,8 @@ set -eo pipefail
 TARGET=${TARGET:-200}
 BATCH_SIZE=${BATCH_SIZE:-25}
 SEED_BASE=${SEED_BASE:-0}
-OUTPUT=${OUTPUT:-/workspace/data/demos_raw_final}
-WS=/workspace
+WS=${WS:-/home/peyton/vla_arm}
+OUTPUT=${OUTPUT:-$WS/data/demos_raw_final}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -55,21 +55,28 @@ while [[ "$total_successes" -lt "$TARGET" ]]; do
   bash "$WS/scripts/nuke_sim.sh" >/dev/null 2>&1 || true
   sleep 1
 
-  # Bring up combined Gazebo + MoveIt.
-  nohup ros2 launch arm_moveit_config arm_gazebo_moveit.launch.py > /tmp/collect_gz.log 2>&1 &
+  # Bring up Gazebo + arm + controllers (headless; keyframe expert doesn't
+  # need move_group anymore, just the two joint-trajectory controllers).
+  nohup ros2 launch arm_description arm_gazebo.launch.py headless:=true \
+      > /tmp/collect_gz.log 2>&1 &
   GZ_PID=$!
   echo "[collect] launched sim pid=$GZ_PID"
 
-  # Wait for move_group.
+  # Wait for controllers.
+  sim_ready=0
   for _ in $(seq 1 60); do
-    if grep -q "You can start planning now" /tmp/collect_gz.log 2>/dev/null; then
+    if ros2 control list_controllers 2>/dev/null \
+        | grep -q "arm_controller.*active" \
+        && ros2 control list_controllers 2>/dev/null \
+        | grep -q "gripper_controller.*active"; then
+      sim_ready=1
       break
     fi
     sleep 1
   done
   sleep 2
-  if ! grep -q "You can start planning now" /tmp/collect_gz.log; then
-    echo "[collect] sim never came up; skipping batch"
+  if [[ "$sim_ready" -ne 1 ]]; then
+    echo "[collect] controllers never came up; skipping batch"
     bash "$WS/scripts/nuke_sim.sh" >/dev/null 2>&1 || true
     batch_idx=$((batch_idx + 1))
     continue

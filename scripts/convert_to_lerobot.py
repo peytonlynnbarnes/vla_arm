@@ -58,12 +58,27 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 
+def _ffmpeg_exe() -> str:
+    """Return the ffmpeg binary path: prefer system, fall back to imageio_ffmpeg."""
+    sys_ff = shutil.which('ffmpeg')
+    if sys_ff:
+        return sys_ff
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        raise RuntimeError(
+            'ffmpeg not found. Install via apt (`sudo apt install ffmpeg`) '
+            'or pip (`pip install imageio-ffmpeg`).'
+        )
+
+
 def write_video(frames: np.ndarray, output_path: Path, fps: int):
     """Write (N, H, W, 3) uint8 frames to MP4 via ffmpeg."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     n, h, w, _ = frames.shape
     cmd = [
-        'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+        _ffmpeg_exe(), '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{w}x{h}', '-pix_fmt', 'rgb24',
         '-r', str(fps), '-i', '-',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
